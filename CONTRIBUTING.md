@@ -29,6 +29,28 @@ go vet ./...
 go test -race ./... -count=1
 ```
 
+## 桌面端（internal/desktop）
+
+桌面端只在 Windows 上编译，其余平台是占位实现，因此 `go vet ./...` 与 CI 不受影响。
+
+前端构建产物 `internal/desktop/frontend/dist/` **必须提交进仓库**：`go:embed` 在编译期
+就需要它，提交后 `go build` 和 GoReleaser 在没有 npm 的环境下也能工作。改动前端后请执行：
+
+```bash
+cd internal/desktop/frontend
+npm ci
+npm run build      # 同时跑 vue-tsc 类型检查
+```
+
+并把 `dist/` 的变更一并提交。仅改 Go 代码时不需要这一步。
+
+本地调试桌面端：
+
+```bash
+go build -o bin/mcpx.exe ./cmd/mcpx-server
+./bin/mcpx.exe desktop
+```
+
 ## 提交与 Pull Request
 
 提交信息使用 Conventional Commits，subject 使用中文动词描述：

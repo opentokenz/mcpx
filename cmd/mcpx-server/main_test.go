@@ -79,6 +79,18 @@ func TestStopPreviousBackgroundRemovesInvalidState(t *testing.T) {
 	}
 }
 
+// runStop 对"本来就没有后台服务"必须是幂等的：托盘的停止按钮会被重复点，
+// 每次都报错会让用户以为出了问题。
+func TestRunStopIsIdempotentWithoutDaemon(t *testing.T) {
+	t.Setenv("MCPX_HOME", t.TempDir())
+	if code := runStop(); code != 0 {
+		t.Fatalf("runStop without daemon = %d, want 0", code)
+	}
+	if code := runStop(); code != 0 {
+		t.Fatalf("repeated runStop = %d, want 0", code)
+	}
+}
+
 func TestBackgroundStopMessageShowsStoppedDaemons(t *testing.T) {
 	got := backgroundStopMessage([]int{35421, 35422})
 	want := "mcpx stopped previous background daemon (pid=35421)\n" +

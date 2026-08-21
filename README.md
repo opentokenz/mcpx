@@ -193,6 +193,8 @@ http://127.0.0.1:9090/mcp
 
 ```text
 mcpx [flags]                     启动 Streamable HTTP 服务
+mcpx stop                        停止后台服务
+mcpx desktop                     启动托盘与图形界面（仅 Windows）
 mcpx observe [flags] <name>      终端只读观测 Workspace 事件
 mcpx workspace register <path>   注册或更新 Workspace（不启动服务）
 mcpx oauth-register [url]        动态注册 OAuth 客户端
@@ -700,6 +702,43 @@ ARC 2.0 的 `structuredContent.context` 保持精简，只携带当前结果真�
 终端文本按可用信息展示 `purpose`、最新 Activity 以及 Plan / Plan Task / Execution Task / Operation
 关联信息；`-detail` 再追加 call、path 等执行元数据。
 
+## 桌面托盘与图形界面
+
+Windows 上可以用托盘常驻管理服务：
+
+```bash
+./bin/mcpx desktop
+```
+
+启动后直接打开主窗口。只想静默驻留托盘时加 `-tray`：
+
+```bash
+./bin/mcpx desktop -tray
+```
+
+托盘负责服务状态指示与启动 / 停止 / 重启，图形界面提供三块内容：
+
+| 页面 | 内容 |
+| --- | --- |
+| 服务 | 运行状态、PID、监听地址、鉴权模式；启停控制；复制端点地址；监听地址与 Bearer Token 等基础连接配置 |
+| Workspace | 已注册 Workspace 的增删改，标注路径已失效的条目 |
+| 日志 | 实时跟随 `~/.mcpx/logs/mcpx-daemon.log`，支持关键字过滤与清空 |
+
+界面右上角可在**跟随系统 / 浅色 / 深色**之间切换，选择记在本地，下次打开保持。
+选「跟随系统」时会实时响应 Windows 的应用主题变化。
+
+托盘进程与服务进程互相独立：**退出托盘不会停止后台服务**，不装桌面端也不影响 CLI 与 MCP 客户端。
+托盘菜单里的「开机自启」注册的是 `mcpx desktop -tray`，登录时只驻留托盘、不弹窗，也不会自动启动服务。
+
+界面写入 `config.yaml` 前会自动备份为 `config.yaml.bak`。注意写入是整份重新序列化，
+会丢失文件中的注释——这与 `mcpx workspace register` 的行为一致。
+
+状态判定有四种结果：`运行中`、`启动中`（进程在但端口未就绪）、`端口被其他进程占用`
+（没有受管 daemon 但端口已被占用，此时启动必然失败）和`已停止`。
+
+桌面端只在 Windows 上构建；`mcpx desktop` 在 Linux / macOS 上会直接提示仅支持 Windows，
+这些平台的二进制不会链接任何 GUI 依赖。
+
 ## 本机终端观测
 
 服务运行期间，可以在另一个终端只读观察指定 Workspace：
@@ -780,6 +819,7 @@ ARC 内容仍先显示 `Read`、`Edited`、`Ran`、`Searched` 等语义动作，
 ```text
 cmd/mcpx-server       服务入口、后台模式、observe、workspace、oauth-register 和 update
 internal/server       HTTP Gateway、20 个公开工具、Resource、capability 与协议适配
+internal/desktop      Windows 托盘、图形界面与其 /api 处理器（非 Windows 为占位实现）
 internal/arc          ARC 2.0 结果契约、structuredContent、呈现与 trace metadata
 internal/remotesession Remote Session、角色、handoff 与持久化事件
 internal/edit         Edit 解析、原子写、格式保留和变更摘要
