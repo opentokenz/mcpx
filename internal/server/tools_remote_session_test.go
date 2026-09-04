@@ -129,6 +129,7 @@ func TestSessionResumeIncludesPendingConfirmations(t *testing.T) {
 	resume := mcpresult.Request(map[string]any{
 		"intent":            "resume the existing session",
 		"remote_session_id": created.Session.ID,
+		"response_profile":  "full",
 	})
 	attachResult, err := rt.toolSession(context.Background(), resume)
 	if err != nil {

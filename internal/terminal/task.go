@@ -110,7 +110,7 @@ const maxTaskLogBytes = 1 << 20
 
 // MaxPersistedTaskLogBytes bounds the durable task log and is also the
 // default cumulative budget for task output written to observation_events.
-const MaxPersistedTaskLogBytes = 32 << 20
+const MaxPersistedTaskLogBytes = 10 << 20
 
 // TaskManager tracks long tasks per process.
 type TaskManager struct {
@@ -501,19 +501,27 @@ func (t *Task) StatusView() map[string]any {
 // Resource reads. New task_manage callers should use LogsFor for independent
 // stdout and stderr offsets.
 func (t *Task) Logs(offset int) (chunk string, next int) {
-	return t.logsFor("combined", offset)
+	return t.logsFor("combined", offset, 256<<10)
 }
 
 func (t *Task) LogsFor(stream string, offset int) (chunk string, next int) {
+	return t.LogsForLimit(stream, offset, 256<<10)
+}
+
+// LogsForLimit reads one byte-offset window without changing the durable log.
+func (t *Task) LogsForLimit(stream string, offset, limit int) (chunk string, next int) {
+	if limit <= 0 || limit > 256<<10 {
+		limit = 256 << 10
+	}
 	switch stream {
 	case "stdout", "stderr":
-		return t.logsFor(stream, offset)
+		return t.logsFor(stream, offset, limit)
 	default:
-		return t.logsFor("combined", offset)
+		return t.logsFor("combined", offset, limit)
 	}
 }
 
-func (t *Task) logsFor(stream string, offset int) (chunk string, next int) {
+func (t *Task) logsFor(stream string, offset, limit int) (chunk string, next int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	path := t.logPath
@@ -541,10 +549,9 @@ func (t *Task) logsFor(stream string, offset int) (chunk string, next int) {
 		if int64(offset) > size {
 			offset = int(size)
 		}
-		const chunkLimit = 256 << 10
 		remaining := size - int64(offset)
-		if remaining > chunkLimit {
-			remaining = chunkLimit
+		if remaining > int64(limit) {
+			remaining = int64(limit)
 		}
 		data := make([]byte, int(remaining))
 		read, _ := file.ReadAt(data, int64(offset))
@@ -560,7 +567,11 @@ func (t *Task) logsFor(stream string, offset int) (chunk string, next int) {
 	if offset > base+len(data) {
 		offset = base + len(data)
 	}
-	return string(data[offset-base:]), base + len(data)
+	end := offset - base + limit
+	if end > len(data) {
+		end = len(data)
+	}
+	return string(data[offset-base : end]), base + end
 }
 
 func (t *Task) LogSize() int64 {
@@ -758,6 +769,44 @@ func (m *TaskManager) List(remoteSessionID string, limit int) ([]map[string]any,
 		return nil, err
 	}
 	return items, nil
+}
+
+// ActiveIDs returns every currently running Task without completed history.
+func (m *TaskManager) ActiveIDs(remoteSessionID string) ([]string, error) {
+	if m.db == nil {
+		m.mu.Lock()
+		tasks := make([]*Task, 0, len(m.tasks))
+		for _, task := range m.tasks {
+			if task.RemoteSessionID == remoteSessionID {
+				tasks = append(tasks, task)
+			}
+		}
+		m.mu.Unlock()
+		ids := make([]string, 0, len(tasks))
+		for _, task := range tasks {
+			task.mu.Lock()
+			if task.Status == TaskRunning {
+				ids = append(ids, task.ID)
+			}
+			task.mu.Unlock()
+		}
+		sort.Strings(ids)
+		return ids, nil
+	}
+	rows, err := m.db.Query(`SELECT id FROM terminal_tasks WHERE remote_session_id = ? AND status = 'running' ORDER BY id`, remoteSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (t *Task) finishLocked(status TaskStatus, code int) {

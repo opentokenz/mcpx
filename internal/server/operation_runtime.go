@@ -108,7 +108,7 @@ func (r *Runtime) waitForOperationTask(ctx context.Context, input operation.Exec
 		return nil, fmt.Errorf("task %s did not reach a terminal state", taskID)
 	}
 
-	data := r.taskResultData(task, 0, 0)
+	data := r.taskResultData(task, 0, 0, true)
 	data["execution_task_id"] = task.ID
 	data["command"] = task.Command
 	data["purpose"] = input.Purpose

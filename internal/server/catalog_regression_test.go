@@ -77,18 +77,14 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 		t.Fatalf("session structured content type=%T", result.StructuredContent)
 	}
 	instructions, _ := data["instructions"].(map[string]any)
-	if instructions["inline"] != false {
-		t.Fatalf("session should default to instruction metadata only: %+v", instructions)
+	if instructions != nil {
+		t.Fatalf("compact session should omit instruction inventory: %+v", instructions)
 	}
 	if data["project_tasks"] != nil {
 		t.Fatalf("session should not expand project tasks by default: %+v", data["project_tasks"])
 	}
-	for _, item := range asMapSlice(data["tools"]) {
-		for _, forbidden := range []string{"input_schema", "description", "annotations"} {
-			if _, exists := item[forbidden]; exists {
-				t.Fatalf("session capability state must not duplicate tools/list field %q: %+v", forbidden, item)
-			}
-		}
+	if data["tools"] != nil || data["extension_inventory"] != nil {
+		t.Fatalf("compact session must omit repeated tool and extension inventories: %+v", data)
 	}
 
 	remote := data["remote_session"].(map[string]any)
@@ -146,7 +142,7 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 			t.Fatalf("runtime_read must not expose client schema bookkeeping %q: %+v", removed, runtimeReadProperties)
 		}
 	}
-	if data["client_refresh"] != nil || data["omitted_sections"] != nil {
-		t.Fatalf("session bootstrap must not expose client revision bookkeeping: %+v", data)
+	if data["client_refresh"] != nil || data["omitted_sections"] == nil {
+		t.Fatalf("compact session must expose omitted sections without legacy client_refresh: %+v", data)
 	}
 }

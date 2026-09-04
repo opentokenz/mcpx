@@ -122,7 +122,12 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"client_request_id":            stringSchema("客户端幂等键"),
 		"include_instructions_content": booleanSchema("是否内联返回指令内容"),
 		"include_project_tasks":        booleanSchema("是否返回项目任务"),
-		"mode":                         enumSchema("关闭模式；出现时省略 action 也会推导 close", "closed", "archived"),
+		"response_profile":             enumSchema("响应大小；默认 compact，full 仅在显式请求时返回完整 bootstrap", "compact", "full"),
+		"known_revisions": map[string]any{
+			"type": "object", "description": "前回 session 応答の revisions。未変更 section の再送を避ける",
+			"additionalProperties": map[string]any{"type": "string"},
+		},
+		"mode": enumSchema("关闭模式；出现时省略 action 也会推导 close", "closed", "archived"),
 	}, nil, sessionToolAnnotation), r.toolSession)
 
 	readItems := arraySchema(map[string]any{

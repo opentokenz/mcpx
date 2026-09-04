@@ -4,6 +4,7 @@ import (
 	"mcpx/internal/mcpresult"
 
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,8 +104,11 @@ func TestProjectTaskAndArtifactRemoteSessionFlow(t *testing.T) {
 	if !ok {
 		t.Fatalf("terminal logs text type=%T", logsResult.Content[0])
 	}
-	if !strings.Contains(logText.Text, "example.invalid/project") {
-		t.Fatalf("task logs must stay inline in the result text: %q", logText.Text)
+	if strings.Contains(logText.Text, "example.invalid/project") {
+		t.Fatalf("task logs must not be duplicated in human text: %q", logText.Text)
+	}
+	if !strings.Contains(fmt.Sprint(structuredBusinessData(logsResult)), "example.invalid/project") {
+		t.Fatalf("task logs missing from bounded structured content: %+v", logsResult.StructuredContent)
 	}
 	logResources, err := runtime.resourceTaskLogs(ctx, &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: "mcpx://remote-sessions/" + remoteSessionID + "/tasks/" + taskID + "/logs"}})
 	if err != nil || logResources == nil || len(logResources.Contents) != 1 {

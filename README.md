@@ -272,8 +272,8 @@ limits:
 文件策略默认 `max_patch_files=20`、`max_patch_lines=2000`，而公开 `edit` 工具还有独立的
 1000 changed-lines 硬上限；工具结果预算为 256 KiB；Terminal、File Watch、Skill 和上游 MCP
 发现默认启用。状态保留任务默认每天运行一次，过程事件与终端 Task 默认保留 30 天，模型记忆事件
-保留 180 天，环境快照保留 90 天。单个执行 Task 的观测输出最多持久化 32 MiB，超出后观测事件
-会标记为截断；完整输出仍通过 Task 日志 Resource URI 读取。
+保留 180 天，环境快照保留 90 天。单个执行 Task 的观测输出最多持久化 10 MiB，超出后观测事件
+会标记为截断；0600 host log 仍通过 Task 日志 Resource URI 读取。
 
 需要特别注意：当前首次生成的 `config.yaml` 使用 `security.commands.default: allow`，同时内置
 `git push` / `docker` / `npm install` 的 `confirm` 规则和 `rm -rf /` / `mkfs` / `shutdown` 的

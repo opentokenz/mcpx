@@ -2,13 +2,16 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"mcpx/internal/artifact"
 	"mcpx/internal/audit"
 	"mcpx/internal/instruction"
 	"mcpx/internal/observation"
@@ -18,8 +21,8 @@ import (
 	buildversion "mcpx/internal/version"
 )
 
-// toolSessionOpen creates or reuses a Remote Session and returns a full bootstrap bundle
-// so clients need only one MCP call to start developing.
+// toolSessionOpen creates or reuses a Remote Session. Compact is the default;
+// callers must explicitly request full to receive inventories and history.
 func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
@@ -34,6 +37,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	if v, ok := envReq.Payload["include_project_tasks"].(bool); ok {
 		includeProjectTasks = v
 	}
+	fullResponse := strings.EqualFold(strings.TrimSpace(stringPayload(envReq.Payload, "response_profile")), "full")
 	var session remotesession.Session
 	remoteID, _ := envReq.Payload["remote_session_id"].(string)
 	remoteID = strings.TrimSpace(remoteID)
@@ -72,8 +76,10 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		gitHead              string
 		treeDigest           string
 		pendingConfirmations []map[string]any
-		taskList             any
-		artifacts            any
+		taskList             []map[string]any
+		artifacts            []artifact.Artifact
+		activeTaskIDs        []string
+		artifactCount        int
 		latestModelState     any
 	)
 	var tasks any
@@ -113,7 +119,9 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		defer bootstrap.Done()
 		pendingConfirmations = pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
 		taskList, _ = r.tasks.List(session.ID, 20)
+		activeTaskIDs, _ = r.tasks.ActiveIDs(session.ID)
 		artifacts, _ = r.artifacts.List(ctx, session.ID, "", 20)
+		artifactCount, _ = r.artifacts.Count(ctx, session.ID)
 	}()
 	go func() {
 		defer bootstrap.Done()
@@ -156,7 +164,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		"client_protocol_revision":     clientProtocolRevision(),
 	}
 
-	data := map[string]any{
+	fullData := map[string]any{
 		"remote_session_id": session.ID,
 		"mcpx": map[string]any{
 			"version": build.Version, "commit": build.Commit, "build_time": build.Date,
@@ -199,7 +207,52 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		"opened_at": time.Now().UTC().Format(time.RFC3339),
 	}
 	if latestModelState != nil {
-		data["latest_model_state"] = latestModelState
+		fullData["latest_model_state"] = latestModelState
+	}
+
+	data := fullData
+	if !fullResponse {
+		compactGuidance := map[string]any{
+			"version": guidance["version"], "priority": guidance["priority"],
+			"summary": guidance["summary"], "guidance_revision": revisions["guidance_revision"],
+			"tool_routing": guidance["tool_routing"],
+			"full":         nextAction("runtime_read", map[string]any{"view": "capabilities", "workspace": session.WorkspaceName, "remote_session_id": session.ID}),
+		}
+		data = map[string]any{
+			"remote_session_id": session.ID,
+			"remote_session": map[string]any{
+				"id": session.ID, "role": session.Role, "status": session.Status,
+				"label": session.Label, "last_active_at": session.LastActiveAt,
+			},
+			"workspace": map[string]any{
+				"name": session.WorkspaceName, "git_head": gitHead,
+				"dirty": strings.TrimSpace(fmt.Sprint(project["git_status"])) != "",
+			},
+			"revisions":                  revisions,
+			"agent_guidance":             compactGuidance,
+			"pending_confirmation_count": len(pendingConfirmations),
+			"active_tasks":               map[string]any{"count": len(activeTaskIDs), "execution_task_ids": activeTaskIDs},
+			"artifact_count":             artifactCount,
+			"response_profile":           "compact",
+			"changed_sections":           changedSessionSections(revisions, envReq.Payload["known_revisions"]),
+			"omitted_sections":           []string{"agent_guidance.rules", "client_protocol", "extension_inventory", "tools", "completed_tasks", "project", "recommended_workflows"},
+			"recommended_next_tool":      nextAction("read", map[string]any{"remote_session_id": session.ID, "view": "list"}),
+			"resources": map[string]any{
+				"instructions":           nextAction("runtime_read", map[string]any{"view": "instructions", "workspace": session.WorkspaceName, "remote_session_id": session.ID}),
+				"task_logs_uri_template": "mcpx://remote-sessions/{remote_session_id}/tasks/{execution_task_id}/logs",
+			},
+		}
+		if includeInstrContent {
+			data["instructions"] = instructionPayload
+		}
+		if includeProjectTasks {
+			data["project_tasks"] = tasks
+		}
+		if latestModelState != nil {
+			data["latest_model_state"] = compactLatestModelState(latestModelState)
+		}
+	} else {
+		data["response_profile"] = "full"
 	}
 
 	r.logAudit(audit.Event{
@@ -207,4 +260,29 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		Tool: "session", Status: "ok",
 	})
 	return compactToolResult(data, fmt.Sprintf("Session %s opened for workspace %s.", session.ID, session.WorkspaceName)), nil
+}
+
+func compactLatestModelState(value any) map[string]any {
+	encoded, _ := json.Marshal(value)
+	var source map[string]any
+	_ = json.Unmarshal(encoded, &source)
+	compact := map[string]any{}
+	for _, key := range []string{"status", "summary", "progress_summary", "next_step", "created_at", "event_id", "sequence"} {
+		if item := source[key]; item != nil && fmt.Sprint(item) != "" {
+			compact[key] = item
+		}
+	}
+	return compact
+}
+
+func changedSessionSections(current map[string]any, known any) []string {
+	knownMap, _ := known.(map[string]any)
+	changed := make([]string, 0, len(current))
+	for key, value := range current {
+		if fmt.Sprint(knownMap[key]) != fmt.Sprint(value) {
+			changed = append(changed, key)
+		}
+	}
+	slices.Sort(changed)
+	return changed
 }

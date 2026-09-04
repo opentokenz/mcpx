@@ -89,16 +89,12 @@ func (g *Gateway) wrapMCP(next http.Handler) http.Handler {
 		)
 		if !cred.OK {
 			authHeader := r.Header.Get("Authorization")
-			authPrefix := ""
-			if len(authHeader) >= 14 {
-				authPrefix = authHeader[:14]
-			}
 			logging.L().Info("mcp auth denied",
 				"component", "mcp_http", "method", r.Method, "path", r.URL.Path,
 				"mode", mode, "has_auth", authHeader != "",
-				"auth_len", len(authHeader), "auth_prefix", authPrefix,
+				"auth_len", len(authHeader),
 				"issuer", issuer, "resource", resource,
-				"session_id", r.Header.Get("Mcp-Session-Id"))
+				"mcp_transport_session_hash", privacySafeHash(r.Header.Get("Mcp-Session-Id")))
 			// Prefer path-qualified metadata URL (MCP resource is …/mcp)
 			metaURL := issuer + "/.well-known/oauth-protected-resource/mcp"
 			w.Header().Set("WWW-Authenticate",

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -218,7 +219,15 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 			_ = r.observation.RecordToolCompleted(callCtx, name, observationRequest, observedArguments, result, err, timing)
 		}
 		if !internalOperationStep {
-			logToolCall(name, runtime, status, timing)
+			principalHash := ""
+			if principal, principalErr := r.principalFromContext(callCtx); principalErr == nil {
+				principalHash = privacySafeHash(principal.ID)
+			}
+			remoteSessionID := observationRequest.RemoteSessionID
+			if remoteSessionID == "" {
+				remoteSessionID = resultRemoteSessionID(result)
+			}
+			logToolCall(name, runtime, status, timing, principalHash, remoteSessionID, r.currentToolSchemaRevision(), result)
 		}
 		return result, err
 	}
@@ -383,18 +392,83 @@ func makeInteractionTiming(startedAtMs int64, received, completed time.Time) int
 	}
 }
 
-func logToolCall(name string, runtime RuntimeContext, status string, timing interactionTiming) {
+func logToolCall(name string, runtime RuntimeContext, status string, timing interactionTiming, principalHash, remoteSessionID, schemaRevision string, result *mcp.CallToolResult) {
+	completedUTC := time.UnixMilli(timing.CompletedAtMs).UTC()
+	structuredBytes, totalBytes := 0, jsonSize(result)
+	if result != nil {
+		structuredBytes = jsonSize(result.StructuredContent)
+	}
+	encoded, _ := json.Marshal(result)
 	fields := []any{
 		"tool", name, "status", status,
+		"classification", classifyToolResult(status, encoded),
 		"request_id", runtime.RequestID, "trace_id", runtime.TraceID, "span_id", runtime.SpanID,
+		"timestamp_utc", completedUTC.Format(time.RFC3339Nano),
+		"timestamp_jst", completedUTC.In(time.FixedZone("JST", 9*60*60)).Format(time.RFC3339Nano),
+		"principal_hash", principalHash, "remote_session_id", remoteSessionID,
 		"started_at_ms", timing.StartedAtMs, "received_at_ms", timing.ReceivedAtMs,
 		"completed_at_ms", timing.CompletedAtMs, "network_latency_ms", timing.NetworkLatencyMs,
 		"processing_ms", timing.ProcessingMs, "server_elapsed_ms", timing.ServerElapsedMs,
+		"response_structured_content_bytes", structuredBytes, "response_total_bytes", totalBytes,
+		"truncated", strings.Contains(string(encoded), `"truncated":true`) || strings.Contains(string(encoded), `"output_truncated":true`),
+		"oauth_refresh_executed", "not_observed_by_mcpx", "tool_schema_revision", schemaRevision,
+		"tunnel_reconnect_state", "not_observed_by_mcpx",
 	}
 	if runtime.ClientName != "" {
 		fields = append(fields, "client_name", runtime.ClientName, "client_version", runtime.ClientVersion)
 	}
 	logging.With("component", "mcp_tool").Info("call", fields...)
+}
+
+func jsonSize(value any) int {
+	encoded, _ := json.Marshal(value)
+	return len(encoded)
+}
+
+func resultRemoteSessionID(result *mcp.CallToolResult) string {
+	if result == nil {
+		return ""
+	}
+	structured, _ := result.StructuredContent.(map[string]any)
+	data, _ := structured["data"].(map[string]any)
+	if value, _ := data["remote_session_id"].(string); value != "" {
+		return value
+	}
+	remote, _ := data["remote_session"].(map[string]any)
+	value, _ := remote["id"].(string)
+	return value
+}
+
+func privacySafeHash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("sha256:%x", digest[:12])
+}
+
+func classifyToolResult(status string, encoded []byte) string {
+	text := strings.ToLower(string(encoded))
+	if strings.Contains(text, `"outcome":"stopped"`) {
+		return "codex_task_stopped"
+	}
+	if status == "ok" {
+		return "success"
+	}
+	if strings.Contains(text, `"code":"not_found"`) {
+		return "remote_session_not_found"
+	}
+	if strings.Contains(text, "process_exit") || strings.Contains(text, "runtime_limit_exceeded") || strings.Contains(text, "command_not_found") {
+		return "codex_task_failed"
+	}
+	if strings.Contains(text, `"code":"bad_request"`) || strings.Contains(text, `"code":"invalid_action"`) {
+		return "tool_schema_validation_failed"
+	}
+	if len(encoded) == 0 || string(encoded) == "null" {
+		return "result_missing"
+	}
+	// A business-tool error still proves that the app request reached MCPX.
+	return "success"
 }
 
 type accessLogResponseWriter struct {
@@ -462,9 +536,28 @@ func (g *Gateway) accessLog(next http.Handler) http.Handler {
 			"trace_id", runtime.TraceID,
 			"span_id", runtime.SpanID,
 			"duration_ms", processingMs,
-			"response_bytes", logged.bytes,
-			"mcp_session_id", r.Header.Get("Mcp-Session-Id"),
-			"remote_addr", r.RemoteAddr,
+			"request_received", true,
+			"request_body_bytes", r.ContentLength,
+			"response_total_bytes", logged.bytes,
+			"mcp_transport_session_hash", privacySafeHash(r.Header.Get("Mcp-Session-Id")),
+			"http_classification", classifyHTTPStatus(status),
 		)
 	})
+}
+
+func classifyHTTPStatus(status int) string {
+	switch {
+	case status >= 200 && status < 300:
+		return "success"
+	case status == http.StatusBadRequest:
+		return "tool_schema_validation_failed"
+	case status == http.StatusUnauthorized:
+		return "oauth_access_expired"
+	case status == http.StatusRequestEntityTooLarge:
+		return "response_too_large"
+	case status >= 500:
+		return "mcpx_unhealthy"
+	default:
+		return "transport_unhealthy"
+	}
 }

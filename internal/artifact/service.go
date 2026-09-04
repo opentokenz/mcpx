@@ -157,6 +157,12 @@ func (s *Service) List(ctx context.Context, remoteSessionID, kind string, limit 
 	return result, rows.Err()
 }
 
+func (s *Service) Count(ctx context.Context, remoteSessionID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM artifacts WHERE remote_session_id = ?`, remoteSessionID).Scan(&count)
+	return count, err
+}
+
 func (s *Service) Read(ctx context.Context, remoteSessionID, artifactID, workspaceRoot string, offset int64, limit int) (ReadResult, error) {
 	artifact, err := s.Get(ctx, remoteSessionID, artifactID)
 	if err != nil {

@@ -25,7 +25,7 @@ func (r *Runtime) resourceTaskLogs(ctx context.Context, req *mcp.ReadResourceReq
 	if err != nil {
 		return nil, err
 	}
-	logs, err := task.ReadAllLogs(8 << 20)
+	logs, err := task.ReadAllLogs(10 << 20)
 	if err != nil {
 		return nil, err
 	}

@@ -117,7 +117,7 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
 	ctx := authContextForCapabilities()
-	created := callEnvelope(t, runtime.toolSessionOpen, ctx, map[string]any{"workspace": "project"})
+	created := callEnvelope(t, runtime.toolSessionOpen, ctx, map[string]any{"workspace": "project", "response_profile": "full"})
 	createdData := created["data"].(map[string]any)
 	openedInventory := createdData["extension_inventory"].(map[string]any)
 	openedSkills := openedInventory["skills"].([]any)

@@ -533,6 +533,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		"label":                        "acceptance",
 		"include_instructions_content": true,
 		"include_project_tasks":        true,
+		"response_profile":             "full",
 	})
 	if opened["status"] != "ok" && opened["ok"] != true {
 		t.Fatalf("session_open: %+v", opened)
@@ -665,11 +666,11 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	resumed := call("session", map[string]any{"action": "open", "remote_session_id": remoteID})
 	resumedData, _ := resumed["data"].(map[string]any)
-	if resumedData["client_refresh"] != nil || resumedData["omitted_sections"] != nil {
-		t.Fatalf("session re-open must return canonical bootstrap without revision bookkeeping: %+v", resumedData)
+	if resumedData["response_profile"] != "compact" || resumedData["omitted_sections"] == nil {
+		t.Fatalf("session re-open must return compact bootstrap with explicit omissions: %+v", resumedData)
 	}
-	if len(asMapSlice(resumedData["tools"])) == 0 || resumedData["instructions"] == nil {
-		t.Fatalf("session re-open must return complete bootstrap facts: %+v", resumedData)
+	if resumedData["tools"] != nil || resumedData["instructions"] != nil {
+		t.Fatalf("session re-open must not repeat inventories or instructions: %+v", resumedData)
 	}
 
 	// --- A04 nested AGENTS ---

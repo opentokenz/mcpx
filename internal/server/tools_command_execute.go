@@ -244,7 +244,7 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 	waitCtx, cancel := context.WithTimeout(ctx, yield)
 	completed := task.Wait(waitCtx)
 	cancel()
-	data := r.taskResultData(task, 0, 0)
+	data := r.taskResultData(task, 0, 0, true)
 	data["purpose"] = purpose
 	data["scope"] = scope
 	data["command_digest"] = commandDigest
@@ -623,7 +623,7 @@ func (r *Runtime) executeRuntimeTask(ctx context.Context, envReq envelope.Reques
 	waitCtx, cancel := context.WithTimeout(ctx, ephemeralRuntimeWait(envReq.Payload))
 	completed := task.Wait(waitCtx)
 	cancel()
-	data := r.taskResultData(task, 0, 0)
+	data := r.taskResultData(task, 0, 0, true)
 	data["purpose"] = purpose
 	data["scope"] = scope
 	data["command_digest"] = commandDigest
@@ -798,7 +798,8 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 		annotateExecutionOutcome(data)
 		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
 	case "logs":
-		data := r.taskResultData(task, intPayload(envReq.Payload, "stdout_offset"), intPayload(envReq.Payload, "stderr_offset"))
+		data := r.taskResultData(task, intPayload(envReq.Payload, "stdout_offset"), intPayload(envReq.Payload, "stderr_offset"), false)
+		addTaskObservationContext(data, task, envReq.Intent)
 		if int64(data["stdout_next_offset"].(int)) < task.LogStreamSize("stdout") || int64(data["stderr_next_offset"].(int)) < task.LogStreamSize("stderr") {
 			nextTool := "task_manage"
 			if isCleanCoreRequest(ctx) {
@@ -806,13 +807,14 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 			}
 			data["next_action"] = nextAction(nextTool, map[string]any{"remote_session_id": remote.ID, "view": "logs", "execution_task_id": task.ID, "stdout_offset": data["stdout_next_offset"], "stderr_offset": data["stderr_next_offset"]})
 		}
-		result := compactToolResult(data, commandOutputText(ctx, data, fmt.Sprintf("Task %s log chunk returned.", task.ID)))
+		result := compactToolResult(data, fmt.Sprintf("Task %s log chunk returned; use structuredContent for the bounded log window.", task.ID))
 		return result, nil
 	case "attach":
 		waitCtx, cancel := context.WithTimeout(ctx, commandYield(envReq.Payload))
 		task.Wait(waitCtx)
 		cancel()
-		data := r.taskResultData(task, intPayload(envReq.Payload, "stdout_offset"), intPayload(envReq.Payload, "stderr_offset"))
+		data := r.taskResultData(task, intPayload(envReq.Payload, "stdout_offset"), intPayload(envReq.Payload, "stderr_offset"), false)
+		addTaskObservationContext(data, task, envReq.Intent)
 		stdoutNext := data["stdout_next_offset"].(int)
 		stderrNext := data["stderr_next_offset"].(int)
 		if fmt.Sprint(task.StatusView()["status"]) == string(terminal.TaskRunning) || int64(stdoutNext) < task.LogStreamSize("stdout") || int64(stderrNext) < task.LogStreamSize("stderr") {
@@ -827,7 +829,7 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 			response.RemoteSessionID = remote.ID
 			return r.resultJSON(response)
 		}
-		result := compactToolResult(data, commandOutputText(ctx, data, fmt.Sprintf("Task %s attached.", task.ID)))
+		result := compactToolResult(data, fmt.Sprintf("Task %s attached; use structuredContent for the bounded log window.", task.ID))
 		return result, nil
 	case "stop":
 		if err := task.Kill(); err != nil {
@@ -855,10 +857,14 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 	}
 }
 
-func (r *Runtime) taskResultData(task *terminal.Task, stdoutOffset, stderrOffset int) map[string]any {
-	stdout, stdoutNext := task.LogsFor("stdout", stdoutOffset)
-	stderr, stderrNext := task.LogsFor("stderr", stderrOffset)
+func (r *Runtime) taskResultData(task *terminal.Task, stdoutOffset, stderrOffset int, includeCommand bool) map[string]any {
+	const inlineLogBytes = 4 << 10
+	stdout, stdoutNext := task.LogsForLimit("stdout", stdoutOffset, inlineLogBytes/2)
+	stderr, stderrNext := task.LogsForLimit("stderr", stderrOffset, inlineLogBytes/2)
 	data := task.StatusView()
+	if !includeCommand {
+		delete(data, "command")
+	}
 	data["execution_task_id"] = task.ID
 	data["stdout"] = stdout
 	data["stderr"] = stderr
@@ -866,8 +872,23 @@ func (r *Runtime) taskResultData(task *terminal.Task, stdoutOffset, stderrOffset
 	data["stderr_offset"] = stderrOffset
 	data["stdout_next_offset"] = stdoutNext
 	data["stderr_next_offset"] = stderrNext
+	data["resource_uri"] = fmt.Sprintf("mcpx://remote-sessions/%s/tasks/%s/logs", task.RemoteSessionID, task.ID)
+	truncated := int64(stdoutNext) < task.LogStreamSize("stdout") || int64(stderrNext) < task.LogStreamSize("stderr")
+	if logTruncated, _ := data["log_truncated"].(bool); logTruncated {
+		truncated = true
+	}
+	data["truncated"] = truncated
+	data["output_truncated"] = truncated
 	annotateExecutionOutcome(data)
 	return data
+}
+
+func addTaskObservationContext(data map[string]any, task *terminal.Task, purpose string) {
+	digest := sha256.Sum256([]byte(task.Command))
+	data["command_digest"] = "sha256:" + hex.EncodeToString(digest[:])
+	if purpose = strings.TrimSpace(purpose); purpose != "" {
+		data["purpose"], _ = TruncateUTF8(purpose, 256)
+	}
 }
 
 // annotateExecutionOutcome gives every execution Task one canonical business
