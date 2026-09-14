@@ -410,7 +410,7 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 				}, "required": []string{"canonical_path", "remote_name", "remote_sha256", "ref", "head", "tree", "run_id"},
 			},
 			"runtime":  enumSchema("一次性临时运行时；sqlite 仅支持只读查询", "python", "node", "sqlite"),
-			"script":   stringSchema("Python/Node 源码或 SQLite 单条只读查询；最大 65536 bytes。服务端只持久化 SHA/字节数，不把源码写入 Task/audit/observation"),
+			"script":   stringSchema("Python/Node 源码或 SQLite 单条只读查询；最大 65536 bytes。服务端只持久化 SHA/字节数，不把源码写入 Task/audit/observation。需要跨轮恢复时，首次调用前由调用方在获准位置保存非敏感脚本及完整原始请求并独立回读校验；确认时保留原始参数与 idempotency_key，仅设置 user_confirmed=true。原文缺失或校验失败时停止"),
 			"database": stringSchema("仅 sqlite runtime 使用；Workspace 内现有 SQLite 数据库的相对路径"),
 		}, Required: []string{"remote_session_id", "purpose"}},
 		"attach": {Description: "等待并读取已有执行 Task 的输出；延续既有 Task，不需要客户端重复 purpose。", Properties: map[string]any{

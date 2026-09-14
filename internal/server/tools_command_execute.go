@@ -159,12 +159,13 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 				response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, remote.WorkspaceName,
 					confirmationData, "USER_CONFIRMATION_REQUIRED", "命令执行等待用户语义确认")
 				response.RemoteSessionID = remote.ID
+				if runtimeSpec != nil {
+					confirmationData["summary"] = "临时脚本等待用户确认；服务端不保存脚本正文，也不提供可直接执行的重试模板。调用方须回读已保存的完整原始请求与脚本，核对 script_sha256、script_bytes、Workspace 身份并保留全部业务参数、remote_session_id 和 idempotency_key；获准后仅将 user_confirmed 改为 true。原始请求缺失或校验失败时停止，不得重建等价脚本或换 key 重跑。"
+					return r.resultJSON(response)
+				}
 				retryArguments := map[string]any{
 					"remote_session_id": remote.ID, "action": "run", "command": command,
 					"purpose": purpose, "scope": scope, "user_confirmed": true,
-				}
-				if runtimeSpec != nil {
-					retryArguments = runtimeConfirmationRetryArguments(remote.ID, purpose, scope, runtimeSpec)
 				}
 				if argvSpec != nil {
 					confirmationData["argv"] = envReq.Payload["argv"]
@@ -604,22 +605,6 @@ func addRuntimeConfirmationData(data map[string]any, spec *ephemeralRuntimeSpec)
 	}
 	data["wall_limit_ms"] = ephemeralRuntimeWallLimit.Milliseconds()
 	data["cpu_time_limit_ms"] = ephemeralRuntimeCPUTimeLimit.Milliseconds()
-}
-
-func runtimeConfirmationRetryArguments(remoteID, purpose, scope string, spec *ephemeralRuntimeSpec) map[string]any {
-	arguments := map[string]any{
-		"remote_session_id": remoteID,
-		"action":            "run",
-		"runtime":           spec.Runtime,
-		"purpose":           purpose,
-		"scope":             scope,
-		"user_confirmed":    true,
-		"note":              "reuse the exact original script; confirmation is bound to its SHA-256 and script source is not persisted",
-	}
-	if spec.Runtime == "sqlite" {
-		arguments["database"] = spec.Database
-	}
-	return arguments
 }
 
 func normalizeSQLiteDatabasePath(workspaceRoot, database string) (string, error) {
