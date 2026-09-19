@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -63,7 +64,7 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequ
 			if strings.TrimSpace(path) == "" {
 				return r.sourceError(envReq, session.ID, session.WorkspaceName, fmt.Errorf("item path is required"))
 			}
-			items = append(items, source.BatchReadRequest{Path: path, Offset: intPayload(item, "offset"), Limit: intPayload(item, "limit")})
+			items = append(items, source.BatchReadRequest{Path: path, Offset: intPayload(item, "offset"), LineByteOffset: intPayload(item, "line_byte_offset"), Limit: intPayload(item, "limit")})
 		}
 		effective := r.effectiveConfig(session.WorkspacePath)
 		budget := intPayload(envReq.Payload, "max_total_bytes")
@@ -74,16 +75,15 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequ
 		results := make([]map[string]any, 0, len(batch.Results))
 		for _, item := range batch.Results {
 			entry := map[string]any{
-				"path": item.Path, "ok": item.OK, "content": item.Content, "sha256": item.SHA256, "line_ending": item.LineEnding,
+				"path": item.Path, "ok": item.OK, "content": item.Content, "rev": compactFileRevision(item.SHA256), "line_ending": item.LineEnding,
 				"format": formatMap(item.Format),
 				"offset": item.Offset, "limit": item.Limit, "total_lines": item.TotalLines, "truncated": item.Truncated,
 			}
+			if item.LineByteOffset > 0 {
+				entry["line_byte_offset"] = item.LineByteOffset
+			}
 			if item.Truncated {
-				nextOffset := item.Offset + strings.Count(item.Content, "\n")
-				if nextOffset == item.Offset {
-					nextOffset++
-				}
-				entry["next_offset"] = nextOffset
+				setNextReadCursor(entry, item.Offset, item.LineByteOffset, item.Content)
 			}
 			if item.Error != "" {
 				code, category := "READ_FAILED", "runtime"
@@ -112,10 +112,14 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequ
 			data["continue_from"] = batch.ContinueFrom
 			items := make([]map[string]any, 0, len(batch.ContinueRequests))
 			for _, item := range batch.ContinueRequests {
-				items = append(items, map[string]any{"path": item.Path, "offset": item.Offset, "limit": item.Limit})
+				arguments := map[string]any{"path": item.Path, "offset": item.Offset, "limit": item.Limit}
+				if item.LineByteOffset > 0 {
+					arguments["line_byte_offset"] = item.LineByteOffset
+				}
+				items = append(items, arguments)
 			}
 			data["next_action"] = nextAction("read", map[string]any{
-				"remote_session_id": session.ID, "items": items, "max_total_bytes": budget,
+				"remote_session_id": session.ID, "items": items, "max_total_bytes": readBatchContinuationBudget(batch, budget),
 			})
 		}
 		summary := fmt.Sprintf("Read %d source item(s); %d bytes returned.", len(results), batch.TotalBytes)
@@ -134,17 +138,22 @@ func (r *Runtime) toolFileReadUnified(ctx context.Context, req *mcp.CallToolRequ
 		response.RemoteSessionID = session.ID
 		return r.resultJSON(response)
 	}
-	read, err := source.Read(session.WorkspacePath, path, intPayload(envReq.Payload, "offset"), intPayload(envReq.Payload, "limit"), r.effectiveConfig(session.WorkspacePath).Security.Files.MaxReadBytes)
+	effective := r.effectiveConfig(session.WorkspacePath)
+	maxBytes := readWindowMaxBytes(effective, intPayload(envReq.Payload, "max_bytes_per_file"))
+	read, err := source.ReadWindow(session.WorkspacePath, path, intPayload(envReq.Payload, "offset"), intPayload(envReq.Payload, "line_byte_offset"), intPayload(envReq.Payload, "limit"), maxBytes)
 	if err != nil {
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
 	}
 	data := map[string]any{
-		"path": read.Path, "content": read.Content, "sha256": read.SHA256, "line_ending": read.LineEnding,
+		"path": read.Path, "content": read.Content, "rev": compactFileRevision(read.SHA256), "line_ending": read.LineEnding,
 		"format": formatMap(read.Format),
 		"offset": read.Offset, "limit": read.Limit, "total_lines": read.TotalLines, "truncated": read.Truncated,
 	}
+	if read.LineByteOffset > 0 {
+		data["line_byte_offset"] = read.LineByteOffset
+	}
 	if read.Truncated {
-		data["next_action"] = nextAction("read", map[string]any{"remote_session_id": session.ID, "path": path, "offset": read.Offset + read.Limit, "limit": read.Limit})
+		data["next_action"] = nextAction("read", readContinuationArguments(session.ID, path, read.Offset, read.LineByteOffset, read.Content, read.Limit))
 	}
 	summary := fmt.Sprintf("Read %s (%d lines).", path, read.TotalLines)
 	return compactToolResult(data, sourceReadDisplay(data, summary)), nil
@@ -261,7 +270,7 @@ func (r *Runtime) toolFileReadMixedBatch(_ context.Context, envReq envelope.Requ
 		if maxBytes <= 0 || maxBytes > int64(remaining) {
 			maxBytes = int64(remaining)
 		}
-		read, err := source.Read(session.WorkspacePath, path, intPayload(item, "offset"), intPayload(item, "limit"), maxBytes)
+		read, err := source.ReadWindow(session.WorkspacePath, path, intPayload(item, "offset"), intPayload(item, "line_byte_offset"), intPayload(item, "limit"), maxBytes)
 		if err != nil {
 			results = append(results, map[string]any{
 				"path": path, "ok": false,
@@ -271,12 +280,15 @@ func (r *Runtime) toolFileReadMixedBatch(_ context.Context, envReq envelope.Requ
 		}
 		entry := map[string]any{
 			"path": read.Path, "mode": "window", "ok": true, "content": read.Content,
-			"sha256": read.SHA256, "line_ending": read.LineEnding, "format": formatMap(read.Format),
+			"rev": compactFileRevision(read.SHA256), "line_ending": read.LineEnding, "format": formatMap(read.Format),
 			"offset": read.Offset, "limit": read.Limit, "total_lines": read.TotalLines, "truncated": read.Truncated,
+		}
+		if read.LineByteOffset > 0 {
+			entry["line_byte_offset"] = read.LineByteOffset
 		}
 		if read.Truncated {
 			truncated = true
-			entry["next_offset"] = read.Offset + strings.Count(read.Content, "\n")
+			setNextReadCursor(entry, read.Offset, read.LineByteOffset, read.Content)
 		}
 		results = append(results, entry)
 		used += len(read.Content)
@@ -287,6 +299,53 @@ func (r *Runtime) toolFileReadMixedBatch(_ context.Context, envReq envelope.Requ
 	return compactToolResult(data, sourceReadDisplay(data, fmt.Sprintf("Read %d source item(s); %d bytes returned.", len(results), used))), nil
 }
 
+func readBatchContinuationBudget(batch source.BatchReadResult, budget int) int {
+	if budget >= utf8.UTFMax {
+		return budget
+	}
+	for _, item := range batch.Results {
+		if item.Truncated && item.Error == "" && item.Content == "" {
+			return utf8.UTFMax
+		}
+	}
+	return budget
+}
+
+func setNextReadCursor(target map[string]any, offset, lineByteOffset int, content string) {
+	nextOffset, nextLineByteOffset := source.AdvanceReadCursor(offset, lineByteOffset, content)
+	target["next_offset"] = nextOffset
+	if nextLineByteOffset > 0 {
+		target["next_line_byte_offset"] = nextLineByteOffset
+	}
+}
+
+func readWindowMaxBytes(effective config.Config, requested int) int64 {
+	maxBytes := effective.Security.Files.MaxReadBytes
+	resultBudget := int64(config.MaxResultBytes(effective.Limits))
+	if resultBudget > 0 && (maxBytes <= 0 || resultBudget < maxBytes) {
+		maxBytes = resultBudget
+	}
+	if requested > 0 && (maxBytes <= 0 || int64(requested) < maxBytes) {
+		maxBytes = int64(requested)
+	}
+	return maxBytes
+}
+
+func readContinuationArguments(remoteSessionID, path string, offset, lineByteOffset int, content string, limit int) map[string]any {
+	nextOffset, nextLineByteOffset := source.AdvanceReadCursor(offset, lineByteOffset, content)
+	arguments := map[string]any{
+		"remote_session_id": remoteSessionID,
+		"view":              "file",
+		"path":              path,
+		"offset":            nextOffset,
+		"limit":             limit,
+	}
+	if nextLineByteOffset > 0 {
+		arguments["line_byte_offset"] = nextLineByteOffset
+	}
+	return arguments
+}
+
 func fullFileReadData(read file.FullReadResult) map[string]any {
 	data := map[string]any{
 		"path":        read.Path,
@@ -295,7 +354,7 @@ func fullFileReadData(read file.FullReadResult) map[string]any {
 		"size_bytes":  read.Size,
 		"line_ending": read.LineEnding,
 		"format":      formatMap(read.Format),
-		"sha256":      read.SHA256,
+		"rev":         compactFileRevision(read.SHA256),
 	}
 	if strings.HasPrefix(read.MIMEType, "image/") && read.MIMEType != "image/svg+xml" {
 		data["encoding"] = "base64"
@@ -399,7 +458,7 @@ func sourceReadDisplay(data map[string]any, summary string) string {
 					fmt.Fprintf(&builder, "\n\n`%s`: %s", path, message)
 				}
 			}
-			if revision, _ := item["sha256"].(string); strings.TrimSpace(revision) != "" {
+			if revision, _ := item["rev"].(string); strings.TrimSpace(revision) != "" {
 				fmt.Fprintf(&builder, "\n\nRevision: `%s`", revision)
 			}
 			continue
@@ -426,9 +485,9 @@ func sourceReadDisplay(data map[string]any, summary string) string {
 			builder.WriteString("\n\n> 内容已截断；请继续调用 `read(view=file)` 读取后续内容。")
 		}
 		// Keep Revision in text so terminal agents that only read content can
-		// copy base_sha256. format/line_ending/charset live only in structured
+		// copy rev. format/line_ending/charset live only in structured
 		// fields (data.format / data.line_ending) — do not restate as prose.
-		if revision, _ := item["sha256"].(string); strings.TrimSpace(revision) != "" {
+		if revision, _ := item["rev"].(string); strings.TrimSpace(revision) != "" {
 			fmt.Fprintf(&builder, "\n\nRevision: `%s`", revision)
 		}
 	}
@@ -564,6 +623,7 @@ func (r *Runtime) toolContextQueryAction(ctx context.Context, req *mcp.CallToolR
 		})
 	}
 	files, _ := data["files"].([]map[string]any)
+	data, _ = compactRevisionPayload(data).(map[string]any)
 	return compactToolResult(data, fmt.Sprintf("Context query returned %d file(s).", len(files))), nil
 }
 
@@ -587,7 +647,7 @@ func (r *Runtime) toolContextSearchAction(ctx context.Context, req *mcp.CallTool
 	if err != nil {
 		return r.sourceError(envReq, session.ID, session.WorkspaceName, err)
 	}
-	data := map[string]any{"matches": resultData.Matches, "truncated": resultData.Truncated}
+	data := map[string]any{"matches": compactRevisionPayload(resultData.Matches), "truncated": resultData.Truncated}
 	if resultData.NextCursor != "" {
 		data["next_cursor"] = resultData.NextCursor
 		data["next_action"] = nextAction("context_query", map[string]any{

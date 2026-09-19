@@ -5,10 +5,10 @@ rules:
   - 工具的 structuredContent 是机器事实来源；remote_session_id、plan_id、plan_task_id、execution_task_id、operation_id、artifact_id、sha256、revision 和 confirmation token 必须从服务端结果原样复用，不要从展示文本解析或凭记忆重建。
   - remote_session_id 丢失、未知或返回 not_found 时，先调用 session(action=list，可带 workspace/query/status) 发现已有 Remote Session；根据 workspace、label、status 和 last_active_at 识别目标，再用返回的完整 remote_session_id 调用 session(action=open) 恢复，不要通过新建 Session 假装 resume。
   - 不要猜测路径、API、符号、ID、revision、工具能力或执行结果；先用对应的只读工具取得证据。没有成功工具结果或验证证据时，不得声称已读取、修改、修复、构建或测试通过。
-  - 每种语义使用唯一 canonical tool：源码/文件读取用 read，环境事实用 environment_read，文件变更用 edit，删除/移出用 move_out，命令/测试/构建用 execute，Session/Task/Plan/历史/日志用 observe；不要用 execute 代替文件或环境读取。
-  - 修改前取得足够的当前证据并保留用户未要求的现有变更；只提交完成目标所需的最小改动。update/rename 使用服务端返回的最新 base_sha256，保持原文件编码、BOM、换行和末尾换行。
+  - 每种语义使用唯一 canonical tool：源码/文件读取用 read，环境事实用 environment_read，文件变更用 edit，删除/移出用 move_out，命令/测试/构建用 execute，Session/Task/Plan/历史/日志用 observe，浏览器操作用 browser；强类型 Browser 动作不足时才用 action=official，官方权限提示需用户确认后原参数重试；不要用 execute 代替文件、环境或浏览器通道。
+  - 修改前取得足够的当前证据并保留用户未要求的现有变更；只提交完成目标所需的最小改动。update/rename 使用服务端 read 返回的最新 rev，保持原文件编码、BOM、换行和末尾换行。
   - effectful 工具的 purpose 必须真实描述当前用户目标、对象和实际影响；测试会执行项目代码，构建可能写缓存或产物，安装/发布/推送/部署/删除等不得虚构为只读或虚构用户授权。
-  - edit 或其他 revision-guarded 操作遇到 STALE_REVISION、冲突或限制时，优先执行 error.recovery、next_action 或 suggested_next；刷新服务端要求的证据后再重试，不要自行发明恢复协议或重放未知状态请求。
+  - edit 或其他操作遇到 STALE_REVISION、冲突或限制时，以 structuredContent.actions 作为唯一模型侧 continuation/recovery 动作；error 只承载错误事实。刷新服务端要求的证据后再重试，不要自行发明恢复协议或重放未知状态请求。
   - 删除、移除或清理只使用 move_out 的 prepare → 用户确认 → submit 协议；confirmation_uuid 和冻结参数由服务端绑定，submit 只按服务端返回的确认动作继续，不要改用 execute 删除。
   - execute 只运行目标确实需要的命令；按真实副作用描述 purpose，并以实际 exit_code/stdout/stderr/Task 状态作为验证证据。长任务返回 execution_task_id 后，用 observe(task/logs) 或 execute(attach) 继续。临时多行 Python/Node 且不创建 Workspace 文件时，可用 execute(action=run, runtime=python|node, script=...)。
   - observe 只观察 Runtime：无目标参数默认 session，execution_task_id 推导 task，plan_task_id 推导 plan，history 过滤条件推导 history，execution_task_id 配合 view=logs 读取日志；Workspace 当前静态内容始终使用 read。
@@ -33,3 +33,4 @@ tool_routing:
   manage_artifacts: [artifact]
   skill_extension: [skill_tool]
   mcp_extension: [mcp_tool]
+  browser_control: [browser]

@@ -39,13 +39,15 @@ func (r *Runtime) toolObserve(ctx context.Context, req *mcp.CallToolRequest) (*m
 			return r.observeTaskIDError(ctx, req, "EXECUTION_TASK_ID_REQUIRED", "view=logs requires execution_task_id; Plan Tasks do not own terminal logs")
 		}
 		return r.toolObserveTask(ctx, req, "logs")
+	case "diff":
+		return r.toolObserveEditDiff(ctx, req)
 	default:
 		if view == "" {
 			envReq, _, fail := r.remoteRequest(ctx, req)
 			if fail != nil {
 				return fail, nil
 			}
-			return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "ambiguous_request", "observe view cannot be inferred uniquely; choose session, task, plan, history, or logs")
+			return r.terminalError(envReq, envReq.RemoteSessionID, envReq.Workspace, "ambiguous_request", "observe view cannot be inferred uniquely; choose session, task, plan, history, logs, or diff")
 		}
 		return r.invalidAction(ctx, req, "observe", view)
 	}
@@ -63,11 +65,14 @@ func canonicalObserveRequest(req *mcp.CallToolRequest) (*mcp.CallToolRequest, st
 	if stringPayload(args, "plan_task_id") != "" {
 		candidates["plan"] = true
 	}
+	if stringPayload(args, "edit_id") != "" {
+		candidates["diff"] = true
+	}
 	if hasObserveArgument(args, "call_id", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "keyword", "kinds", "statuses", "created_after", "created_before") {
 		candidates["history"] = true
 	}
 	if len(candidates) == 0 {
-		if hasObserveArgument(args, "limit", "cursor", "stdout_offset", "stderr_offset") {
+		if hasObserveArgument(args, "limit", "cursor", "offset", "stdout_offset", "stderr_offset") {
 			return req, ""
 		}
 		return forwardedRequest(req, map[string]any{"view": "session"}), "session"

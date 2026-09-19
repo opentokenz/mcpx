@@ -92,6 +92,7 @@ func Run(args []string) error {
 	desk.setupWindow(trayOnly)
 	desk.setupTray()
 	go desk.pollStatus()
+	go desk.pollCloudflareHealth()
 
 	return desk.app.Run()
 }
@@ -174,6 +175,75 @@ func (d *desktopApp) pollStatus() {
 	defer ticker.Stop()
 	for range ticker.C {
 		d.refresh(currentState(), false)
+	}
+}
+
+// pollCloudflareHealth 在 Desktop 驻留期间定时探测公网链路。连续失败才恢复，
+// 避免 Cloudflare 短暂抖动触发重启；手动停止会把 DesiredRunning 清掉，因此
+// watchdog 不会违背用户的停止意图。
+func (d *desktopApp) pollCloudflareHealth() {
+	ticker := time.NewTicker(cloudflareWatchdogCheckInterval)
+	defer ticker.Stop()
+
+	failures := 0
+	var lastRecovery time.Time
+	for range ticker.C {
+		cfg, err := loadCloudflareDesktopConfig()
+		if err != nil || !cfg.AutoRecover {
+			failures = 0
+			continue
+		}
+
+		state := currentCloudflareState()
+		if cloudflareManaged(state) && !cfg.DesiredRunning {
+			// 升级到带 watchdog 的版本时，接管已经在运行的 Tunnel；之后用户
+			// 手动停止会显式清掉 DesiredRunning，不会再次被自动拉起。
+			if err := setCloudflareDesiredRunning(true); err == nil {
+				cfg.DesiredRunning = true
+			}
+		}
+		if !cfg.DesiredRunning {
+			failures = 0
+			continue
+		}
+
+		health := runCloudflareHealthCheck()
+		d.mu.Lock()
+		d.lastCloudflareHealth = &health
+		d.mu.Unlock()
+		d.refresh(currentState(), true)
+
+		if !cloudflareHealthNeedsAutoRecovery(health) {
+			failures = 0
+			continue
+		}
+		failures++
+		if failures < cloudflareWatchdogFailureThreshold {
+			continue
+		}
+		if !lastRecovery.IsZero() && time.Since(lastRecovery) < cloudflareWatchdogRecoveryCooldown {
+			continue
+		}
+
+		// 健康检查与真正执行恢复之间再次确认用户意图，避免恰好碰上手动停止。
+		cfg, err = loadCloudflareDesktopConfig()
+		if err != nil || !cfg.AutoRecover || !cfg.DesiredRunning {
+			failures = 0
+			continue
+		}
+
+		lastRecovery = time.Now()
+		appendCloudflareWatchdogLog("连续 %d 次健康检查异常，开始重启 MCPX + Tunnel；诊断：%s", failures, health.Diagnosis)
+		if err := restartCloudflareAndMCP(); err != nil {
+			appendCloudflareWatchdogLog("自动恢复失败：%v", err)
+			continue
+		}
+		appendCloudflareWatchdogLog("自动恢复操作完成，等待下一轮健康检查确认")
+		failures = 0
+		d.mu.Lock()
+		d.lastCloudflareHealth = nil
+		d.mu.Unlock()
+		d.refresh(currentState(), true)
 	}
 }
 

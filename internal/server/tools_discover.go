@@ -393,7 +393,7 @@ func (r *Runtime) upsertDiscoveryLease(input discoveryLease) discoveryLease {
 			return input
 		}
 	}
-	input.ID = newRuntimeID("ext", 12)
+	input.ID = newOpaqueID("ext", 12)
 	r.discoveries[input.ID] = input
 	return input
 }

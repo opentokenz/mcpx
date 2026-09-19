@@ -44,10 +44,10 @@ func (r *Runtime) toolObserveEditDiff(ctx context.Context, req *mcp.CallToolRequ
 		return r.terminalError(envReq, session.ID, session.WorkspaceName, "EDIT_DIFF_PAGE_INVALID", err.Error())
 	}
 	data := map[string]any{
-		"edit_id":             editID,
-		"remote_session_id":   session.ID,
-		"diff":                page,
-		"diff_summary":        page,
+		"edit_id":           editID,
+		"remote_session_id": session.ID,
+		"diff":              page,
+
 		"encoding":            "utf-8",
 		"offset":              offset,
 		"next_offset":         nextOffset,

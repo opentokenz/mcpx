@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -833,7 +833,7 @@ func (t *Task) WriteStdin(content string) error {
 func taskID(sequence uint64) string {
 	var random [8]byte
 	if _, err := rand.Read(random[:]); err == nil {
-		return "task_" + hex.EncodeToString(random[:])
+		return "task_" + base64.RawURLEncoding.EncodeToString(random[:])
 	}
 	return fmt.Sprintf("task_%d_%d", sequence, time.Now().UnixNano())
 }

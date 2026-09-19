@@ -14,6 +14,35 @@ export interface ServiceState {
   error?: string
 }
 
+export interface BrowserInstallation {
+  family: string
+  profile: string
+  extension_id: string
+  name: string
+  version: string
+}
+
+export interface BrowserBackend {
+  family: string
+  name: string
+  version: string
+  extension_id: string
+  instance_id: string
+}
+
+export interface BrowserIntegrationState {
+  state: 'connected' | 'installed_disconnected' | 'not_installed'
+  installed: boolean
+  connected: boolean
+  installation_count: number
+  browser_count: number
+  pipe_count: number
+  installations: BrowserInstallation[]
+  browsers: BrowserBackend[]
+  help_url: string
+  message: string
+}
+
 export interface WorkspaceItem {
   name: string
   path: string
@@ -38,6 +67,7 @@ export interface CloudflareConfig {
   last_public_url: string
   manage_with_mcpx: boolean
   sync_oauth_server_url: boolean
+  auto_recover: boolean
 }
 
 export interface CloudflareSoftwareStatus {
@@ -105,6 +135,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   status: () => request<ServiceState>('/status'),
+
+  browserStatus: () => request<BrowserIntegrationState>('/browser/status'),
+
+  openBrowserHelp: () => request<{ ok: boolean }>('/browser/help', { method: 'POST' }),
 
   serviceAction: (action: 'start' | 'stop' | 'restart') =>
     request<ServiceState>(`/service/${action}`, { method: 'POST' }),

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -47,8 +48,12 @@ func TestBuildOAuthServerPersistsGeneratedTokenSecretAndDCRClients(t *testing.T)
 		t.Fatal("DCR client was not restored after server initialization")
 	}
 	secretPath := filepath.Join(os.Getenv("MCPX_HOME"), "oauth-token-secret")
-	if info, err := os.Stat(secretPath); err != nil || info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("token secret file is not private: info=%v err=%v", info, err)
+	info, err := os.Stat(secretPath)
+	if err != nil {
+		t.Fatalf("token secret file missing: %v", err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("token secret file is not private: mode=%o", info.Mode().Perm())
 	}
 }
 

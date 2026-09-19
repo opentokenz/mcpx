@@ -91,8 +91,9 @@ func TestReadItemsLimitAndListPathAreStructured(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace.Path, "outside.txt"), []byte("outside\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	symlinkAvailable := true
 	if err := os.Symlink("scoped", filepath.Join(workspace.Path, "scoped-link")); err != nil {
-		t.Fatal(err)
+		symlinkAvailable = false
 	}
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
@@ -137,11 +138,11 @@ func TestReadItemsLimitAndListPathAreStructured(t *testing.T) {
 		entry, _ := raw.(map[string]any)
 		kinds[entry["path"].(string)] = entry["kind"].(string)
 	}
-	if kinds["scoped"] != "directory" || kinds["outside.txt"] != "file" || kinds["scoped-link"] != "symlink" {
+	if kinds["scoped"] != "directory" || kinds["outside.txt"] != "file" || (symlinkAvailable && kinds["scoped-link"] != "symlink") {
 		t.Fatalf("root direct inventory types=%+v", kinds)
 	}
 	pagedRootList := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
-		"remote_session_id": remoteID, "view": "list", "entries_limit": 2,
+		"remote_session_id": remoteID, "view": "list", "entries_limit": 1,
 	})
 	pagedData, _ := pagedRootList["data"].(map[string]any)
 	if pagedData["entries_complete"] != false || pagedData["entries_next_cursor"] == "" {
@@ -154,11 +155,131 @@ func TestReadItemsLimitAndListPathAreStructured(t *testing.T) {
 	}
 }
 
+func TestSingleReadWindowUsesModelResultBudget(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	rt.cfg.Limits.MaxResultBytes = 4
+	workspace, _ := rt.reg.Get("demo")
+	if err := os.WriteFile(filepath.Join(workspace.Path, "single-budget.txt"), []byte("abcdef\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+
+	first := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
+		"remote_session_id": remoteID, "view": "file", "path": "single-budget.txt", "mode": "window", "offset": 0, "limit": 1,
+	})
+	data, _ := first["data"].(map[string]any)
+	firstNext, _ := data["next_action"].(map[string]any)
+	firstArgs, _ := firstNext["arguments"].(map[string]any)
+	if data["content"] != "abcd" || data["truncated"] != true || firstArgs["line_byte_offset"] != float64(4) {
+		t.Fatalf("single read must obey max_result_bytes: %+v", data)
+	}
+
+	stricter := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
+		"remote_session_id": remoteID, "view": "file", "path": "single-budget.txt", "mode": "window", "offset": 0, "limit": 1, "max_bytes_per_file": 2,
+	})
+	strictData, _ := stricter["data"].(map[string]any)
+	strictNext, _ := strictData["next_action"].(map[string]any)
+	strictArgs, _ := strictNext["arguments"].(map[string]any)
+	if strictData["content"] != "ab" || strictArgs["line_byte_offset"] != float64(2) {
+		t.Fatalf("max_bytes_per_file must further tighten single read budget: %+v", strictData)
+	}
+}
+
+func TestReadLongLineNextActionAdvancesWithinLine(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	workspace, _ := rt.reg.Get("demo")
+	if err := os.WriteFile(filepath.Join(workspace.Path, "long-line.txt"), []byte("abcdef\nnext\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+
+	first := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
+		"remote_session_id": remoteID,
+		"view":              "file",
+		"items":             []any{map[string]any{"path": "long-line.txt", "offset": 0, "limit": 2}},
+		"max_total_bytes":   3,
+	})
+	if !statusOK(first) {
+		t.Fatalf("first long-line read=%+v", first)
+	}
+	firstData, _ := first["data"].(map[string]any)
+	firstResults, _ := firstData["results"].([]any)
+	firstItem, _ := firstResults[0].(map[string]any)
+	if firstItem["content"] != "abc" || firstItem["next_offset"] != float64(0) || firstItem["next_line_byte_offset"] != float64(3) {
+		t.Fatalf("first long-line fragment=%+v", firstItem)
+	}
+	next, _ := firstData["next_action"].(map[string]any)
+	arguments, _ := next["arguments"].(map[string]any)
+	items, _ := arguments["items"].([]any)
+	nextItem, _ := items[0].(map[string]any)
+	if next["tool"] != "read" || nextItem["offset"] != float64(0) || nextItem["line_byte_offset"] != float64(3) {
+		t.Fatalf("long-line next action=%+v", next)
+	}
+
+	second := callEnvelope(t, rt.toolRead, context.Background(), arguments)
+	if !statusOK(second) {
+		t.Fatalf("second long-line read=%+v", second)
+	}
+	secondData, _ := second["data"].(map[string]any)
+	secondResults, _ := secondData["results"].([]any)
+	secondItem, _ := secondResults[0].(map[string]any)
+	if secondItem["content"] != "def" || secondItem["line_byte_offset"] != float64(3) || secondItem["next_line_byte_offset"] != float64(6) {
+		t.Fatalf("second long-line fragment=%+v", secondItem)
+	}
+}
+
+func TestReadBatchRaisesContinuationBudgetForUTF8Rune(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	workspace, _ := rt.reg.Get("demo")
+	if err := os.WriteFile(filepath.Join(workspace.Path, "unicode-line.txt"), []byte("你a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+
+	first := callEnvelope(t, rt.toolRead, context.Background(), map[string]any{
+		"remote_session_id": remoteID,
+		"view":              "file",
+		"items":             []any{map[string]any{"path": "unicode-line.txt", "offset": 0, "limit": 1}},
+		"max_total_bytes":   1,
+	})
+	firstData, _ := first["data"].(map[string]any)
+	firstResults, _ := firstData["results"].([]any)
+	firstItem, _ := firstResults[0].(map[string]any)
+	if firstItem["content"] != "" || firstItem["truncated"] != true {
+		t.Fatalf("first unicode fragment=%+v", firstItem)
+	}
+	firstNext, _ := firstData["next_action"].(map[string]any)
+	firstArgs, _ := firstNext["arguments"].(map[string]any)
+	if firstArgs["max_total_bytes"] != float64(4) {
+		t.Fatalf("unicode recovery budget=%+v", firstNext)
+	}
+
+	second := callEnvelope(t, rt.toolRead, context.Background(), firstArgs)
+	secondData, _ := second["data"].(map[string]any)
+	secondResults, _ := secondData["results"].([]any)
+	secondItem, _ := secondResults[0].(map[string]any)
+	if secondItem["content"] != "你a" || secondItem["next_line_byte_offset"] != float64(4) {
+		t.Fatalf("second unicode fragment=%+v", secondItem)
+	}
+	secondNext, _ := secondData["next_action"].(map[string]any)
+	secondArgs, _ := secondNext["arguments"].(map[string]any)
+	third := callEnvelope(t, rt.toolRead, context.Background(), secondArgs)
+	thirdData, _ := third["data"].(map[string]any)
+	thirdResults, _ := thirdData["results"].([]any)
+	thirdItem, _ := thirdResults[0].(map[string]any)
+	if thirdItem["content"] != "\n" || thirdItem["truncated"] != false {
+		t.Fatalf("final unicode fragment=%+v", thirdItem)
+	}
+}
+
 func TestSourceReadDisplayIncludesMarkdownSourceBlock(t *testing.T) {
 	data := map[string]any{
 		"path":        "src/Supplier.vue",
 		"content":     "<template>\n  <div />\n</template>\n",
-		"sha256":      "sha256:test-revision",
+		"rev":         "123456789012345678901234",
 		"line_ending": "CRLF",
 		"format": map[string]any{
 			"charset": "utf-8", "bom": "none", "line_ending": "CRLF",
@@ -171,7 +292,7 @@ func TestSourceReadDisplayIncludesMarkdownSourceBlock(t *testing.T) {
 	}
 
 	display := sourceReadDisplay(data, "Read src/Supplier.vue (10 lines).")
-	for _, want := range []string{"Read src/Supplier.vue", "Revision: `sha256:test-revision`", "### `src/Supplier.vue` (lines 5-7 of 10)", "```vue", "<template>"} {
+	for _, want := range []string{"Read src/Supplier.vue", "Revision: `123456789012345678901234`", "### `src/Supplier.vue` (lines 5-7 of 10)", "```vue", "<template>"} {
 		if !strings.Contains(display, want) {
 			t.Fatalf("source display missing %q: %s", want, display)
 		}
@@ -188,7 +309,7 @@ func TestFileReadResultExposesSourceInHostTextAndKeepsStructuredData(t *testing.
 	data := map[string]any{
 		"path":        "src/Supplier.vue",
 		"content":     "<template>\n  <div />\n</template>\n",
-		"sha256":      "sha256:test-revision",
+		"rev":         "123456789012345678901234",
 		"offset":      0,
 		"limit":       3,
 		"total_lines": 3,
@@ -199,7 +320,7 @@ func TestFileReadResultExposesSourceInHostTextAndKeepsStructuredData(t *testing.
 	if !ok {
 		t.Fatalf("first content type = %T", wrapped.Content[0])
 	}
-	for _, want := range []string{"Read src/Supplier.vue", "Revision: `sha256:test-revision`", "```vue", "<template>"} {
+	for _, want := range []string{"Read src/Supplier.vue", "Revision: `123456789012345678901234`", "```vue", "<template>"} {
 		if !strings.Contains(text.Text, want) {
 			t.Fatalf("host text missing %q: %s", want, text.Text)
 		}
@@ -211,10 +332,10 @@ func TestFileReadResultExposesSourceInHostTextAndKeepsStructuredData(t *testing.
 
 func TestSourceReadDisplayIncludesRevisionForEmptyFile(t *testing.T) {
 	display := sourceReadDisplay(map[string]any{
-		"path":   "empty.txt",
-		"sha256": "sha256:empty-file",
+		"path": "empty.txt",
+		"rev":  "123456789012345678901235",
 	}, "Read empty.txt (0 lines).")
-	if !strings.Contains(display, "Revision: `sha256:empty-file`") {
+	if !strings.Contains(display, "Revision: `123456789012345678901235`") {
 		t.Fatalf("empty-file revision missing: %s", display)
 	}
 }
@@ -264,7 +385,7 @@ func TestFileReadFullReturnsHTMLAndDirectImageContent(t *testing.T) {
 
 	htmlResult := read("preview.html")
 	htmlText, ok := htmlResult.Content[0].(*mcp.TextContent)
-	if !ok || !strings.Contains(htmlText.Text, "```html\n"+string(html)+"```") || !strings.Contains(htmlText.Text, "Revision: `sha256:") {
+	if !ok || !strings.Contains(htmlText.Text, "```html\n"+string(html)+"```") || !strings.Contains(htmlText.Text, "Revision: `") {
 		t.Fatalf("full HTML was not returned directly: %#v", htmlResult.Content)
 	}
 	htmlData := structuredBusinessData(htmlResult)
@@ -332,7 +453,7 @@ func TestFileReadDecodesUTF16ForModelAndWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	window := structuredBusinessData(windowResult)
-	if window["content"] != "two\n" || window["sha256"] != full["sha256"] {
+	if window["content"] != "two\n" || window["rev"] != full["rev"] {
 		t.Fatalf("UTF-16 window result=%+v full=%+v", window, full)
 	}
 }

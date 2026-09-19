@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"mcpx/internal/pythonruntime"
 	"mcpx/internal/terminal"
 )
 
@@ -44,26 +46,39 @@ func Execute(ctx context.Context, sk Skill, workDir string, arguments any) (map[
 	if err != nil {
 		return nil, fmt.Errorf("invalid skill entry: %w", err)
 	}
-	var cmd string
-	switch sk.Manifest.Runtime {
+	var executable string
+	var args []string
+	var command string
+	switch strings.ToLower(strings.TrimSpace(sk.Manifest.Runtime)) {
 	case "node", "js", "javascript":
-		cmd = fmt.Sprintf("cd %q && node %q", sk.Dir, entry)
+		executable = "node"
+		args = []string{entry}
+		command = "node " + entry
 	case "python", "python3", "":
-		cmd = fmt.Sprintf("cd %q && python3 %q", sk.Dir, entry)
+		python, resolveErr := pythonruntime.Resolve()
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		executable = python.Executable
+		args = python.Args(entry)
+		command = python.Command(entry)
 	default:
 		return nil, fmt.Errorf("unsupported runtime %q", sk.Manifest.Runtime)
 	}
-	// pass args via env
+	// Skill executables run directly with the skill directory as cwd. Avoiding
+	// `cd ... && runtime ...` keeps path quoting and shell semantics portable.
 	res, err := terminal.Exec(ctx, terminal.ExecOptions{
-		WorkDir:  workDir,
-		Command:  cmd,
-		Timeout:  120 * time.Second,
-		ExtraEnv: []string{"MCPX_SKILL_ARGS=" + string(argsJSON)},
+		WorkDir:    sk.Dir,
+		Command:    command,
+		Executable: executable,
+		Args:       args,
+		Timeout:    120 * time.Second,
+		ExtraEnv:   []string{"MCPX_SKILL_ARGS=" + string(argsJSON)},
 	})
 	out := map[string]any{
 		"name":              sk.Manifest.Name,
-		"command":           cmd,
-		"working_directory": workDir,
+		"command":           command,
+		"working_directory": sk.Dir,
 		"exit_code":         res.ExitCode,
 		"stdout":            res.Stdout,
 		"stderr":            res.Stderr,

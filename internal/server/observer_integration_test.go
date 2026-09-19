@@ -220,7 +220,7 @@ func TestObservationRecordsRuntimeTaskOutput(t *testing.T) {
 	}
 	const requestID = "req_runtime_output"
 	const tool = "command_execute"
-	command := "printf 'runtime-out token=do-not-store-this-token'; printf 'runtime-err password=do-not-store-this-password' >&2"
+	command := testStdoutStderrCommand("runtime-out token=do-not-store-this-token", "runtime-err password=do-not-store-this-password")
 	task, err := rt.tasks.StartRemoteWithObservation(context.Background(), requestID, tool, created.Session.ID, "demo", registered.Path, command)
 	if err != nil {
 		t.Fatal(err)
@@ -271,7 +271,7 @@ func TestObservationRecordsRuntimeTaskOutput(t *testing.T) {
 		}
 		offsets[event.Stream] += int64(bytesValue)
 	}
-	if streams["stdout"] != "runtime-out token=[REDACTED]" || streams["stderr"] != "runtime-err password=[REDACTED]" {
+	if strings.TrimSpace(streams["stdout"]) != "runtime-out token=[REDACTED]" || strings.TrimSpace(streams["stderr"]) != "runtime-err password=[REDACTED]" {
 		t.Fatalf("runtime output events=%+v", streams)
 	}
 }
@@ -299,33 +299,43 @@ func TestObservationRecordsCommandTaskRequestIdentity(t *testing.T) {
 		Workspace:       "demo",
 		Payload:         map[string]any{},
 	}
+	// echo is a shell builtin on both cmd.exe and POSIX shells. This direct
+	// executeCommandTask test bypasses policy confirmation, so no wrapper is
+	// needed and the observed output is identical across platforms.
+	command := "echo command-out"
 	analysis := security.CommandAnalysis{
 		Decision: security.Allow,
-		Segments: []security.CommandSegmentDecision{{Command: "printf 'command-out'", Decision: security.Allow}},
+		Segments: []security.CommandSegmentDecision{{Command: command, Decision: security.Allow}},
 	}
-	if _, err := rt.executeCommandTask(context.Background(), envReq, principal, created.Session, "printf 'command-out'", time.Second, "test", "workspace", "sha256:test", analysis); err != nil {
+	if _, err := rt.executeCommandTask(context.Background(), envReq, principal, created.Session, command, time.Second, "test", "workspace", "sha256:test", analysis); err != nil {
 		t.Fatal(err)
 	}
 
-	events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
 	found := false
-	for _, event := range events {
-		if event.Type != observation.TypeCommandOutput {
-			continue
-		}
-		var output map[string]any
-		if err := json.Unmarshal(event.Output, &output); err != nil {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !found {
+		events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if output["text"] != "command-out" {
-			continue
+		for _, event := range events {
+			if event.Type != observation.TypeCommandOutput {
+				continue
+			}
+			var output map[string]any
+			if err := json.Unmarshal(event.Output, &output); err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(fmt.Sprint(output["text"])) != "command-out" {
+				continue
+			}
+			found = true
+			if event.RequestID != envReq.RequestID || event.Tool != "command_execute" {
+				t.Fatalf("command output identity=%+v, want request=%q tool=%q", event, envReq.RequestID, "command_execute")
+			}
 		}
-		found = true
-		if event.RequestID != envReq.RequestID || event.Tool != "command_execute" {
-			t.Fatalf("command output identity=%+v, want request=%q tool=%q", event, envReq.RequestID, "command_execute")
+		if !found {
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 	if !found {

@@ -36,10 +36,13 @@ const (
 	cloudflareStatusStopped  = "stopped"
 	cloudflareStatusError    = "error"
 
-	cloudflareQuickReadyTimeout = 30 * time.Second
-	cloudflareHTTPTimeout       = 8 * time.Second
-	cloudflareDownloadTimeout   = 3 * time.Minute
-	cloudflareMaxDownloadBytes  = int64(200 << 20)
+	cloudflareQuickReadyTimeout        = 30 * time.Second
+	cloudflareHTTPTimeout              = 8 * time.Second
+	cloudflareDownloadTimeout          = 3 * time.Minute
+	cloudflareMaxDownloadBytes         = int64(200 << 20)
+	cloudflareWatchdogCheckInterval    = 30 * time.Second
+	cloudflareWatchdogFailureThreshold = 2
+	cloudflareWatchdogRecoveryCooldown = 2 * time.Minute
 )
 
 var tryCloudflareURLPattern = regexp.MustCompile(`https://[a-zA-Z0-9-]+\.trycloudflare\.com`)
@@ -63,6 +66,8 @@ type cloudflareDesktopConfig struct {
 	LastPublicURL      string `json:"last_public_url"`
 	ManageWithMCPX     bool   `json:"manage_with_mcpx"`
 	SyncOAuthServerURL bool   `json:"sync_oauth_server_url"`
+	AutoRecover        bool   `json:"auto_recover"`
+	DesiredRunning     bool   `json:"desired_running"`
 }
 
 type cloudflareProcessState struct {
@@ -121,6 +126,7 @@ func defaultCloudflareDesktopConfig() cloudflareDesktopConfig {
 		Mode:               "quick",
 		ManageWithMCPX:     false,
 		SyncOAuthServerURL: true,
+		AutoRecover:        true,
 	}
 }
 
@@ -156,6 +162,19 @@ func loadCloudflareDesktopConfig() (cloudflareDesktopConfig, error) {
 		cfg.Mode = "quick"
 	}
 	return cfg, nil
+}
+
+func setCloudflareDesiredRunning(desired bool) error {
+	cfg, err := loadCloudflareDesktopConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.DesiredRunning == desired {
+		return nil
+	}
+	cfg.DesiredRunning = desired
+	_, err = saveCloudflareDesktopConfig(cfg)
+	return err
 }
 
 func saveCloudflareDesktopConfig(cfg cloudflareDesktopConfig) (cloudflareDesktopConfig, error) {
@@ -626,6 +645,9 @@ func validateCloudflareStartConfig(desktopCfg cloudflareDesktopConfig, runtimeCf
 func startCloudflareTunnel() (cloudflareState, error) {
 	current := currentCloudflareState()
 	if current.Status == cloudflareStatusRunning || current.Status == cloudflareStatusStarting {
+		if err := setCloudflareDesiredRunning(true); err != nil {
+			return current, err
+		}
 		return current, nil
 	}
 
@@ -735,6 +757,9 @@ func startCloudflareTunnel() (cloudflareState, error) {
 		}
 	}
 
+	if err := setCloudflareDesiredRunning(true); err != nil {
+		return currentCloudflareState(), err
+	}
 	return currentCloudflareState(), nil
 }
 
@@ -840,6 +865,23 @@ func waitForTryCloudflareURL(command *exec.Cmd, lines <-chan string, timeout tim
 }
 
 func stopCloudflareTunnel() error {
+	return stopCloudflareTunnelWithDesired(false)
+}
+
+func stopCloudflareTunnelForRecovery() error {
+	return stopCloudflareTunnelWithDesired(true)
+}
+
+func stopCloudflareTunnelWithDesired(desired bool) error {
+	desiredErr := setCloudflareDesiredRunning(desired)
+	processErr := stopCloudflareTunnelProcess()
+	// 再写一次最终意图，关闭 watchdog 恰好在进程退出期间观察到旧进程并
+	// 重新接管 DesiredRunning 的竞态窗口。
+	finalDesiredErr := setCloudflareDesiredRunning(desired)
+	return errors.Join(desiredErr, processErr, finalDesiredErr)
+}
+
+func stopCloudflareTunnelProcess() error {
 	state, err := readCloudflareProcessState()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -906,6 +948,48 @@ func waitDesktopProcessGone(pid int, executable string, timeout time.Duration) b
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func restartCloudflareAndMCP() error {
+	if err := stopCloudflareTunnelForRecovery(); err != nil {
+		return fmt.Errorf("停止 Cloudflare Tunnel 失败：%w", err)
+	}
+	if err := restartService(); err != nil {
+		return fmt.Errorf("重启 MCPX 服务失败：%w", err)
+	}
+	if _, err := startCloudflareTunnel(); err != nil {
+		return fmt.Errorf("重启 Cloudflare Tunnel 失败：%w", err)
+	}
+	return nil
+}
+
+func cloudflareHealthNeedsAutoRecovery(health cloudflareHealth) bool {
+	if health.OK {
+		return false
+	}
+	if !health.LocalMCP.OK || !health.TunnelProcess.OK || !health.PublicMCP.OK {
+		return true
+	}
+	if !health.OAuthMetadata.OK {
+		return health.OAuthMetadata.StatusCode == 0 || health.OAuthMetadata.StatusCode >= http.StatusInternalServerError
+	}
+	return false
+}
+
+func appendCloudflareWatchdogLog(format string, args ...any) {
+	_, _, _, logPath, _, err := cloudflarePaths()
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return
+	}
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = fmt.Fprintf(file, "%s [watchdog] %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
 }
 
 func runCloudflareHealthCheck() cloudflareHealth {

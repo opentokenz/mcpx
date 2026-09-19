@@ -16,6 +16,7 @@ tools:
   environment: 保存当前环境快照。
   skill_tool: 统一完成 Skill 的 list、describe 与 call；Runtime 内部负责 revision 一致性。
   mcp_tool: 统一完成 MCP Server/Tool 的 list、describe 与 call；Runtime 内部负责 schema revision 一致性。
+  browser: 通过本机 OpenAI 官方 ChatGPT/Codex 浏览器扩展复用现有 Chrome/Edge 与登录态；提供常用标签页/导航/DOM-CUA/输入/截图强类型动作，并以 official 高级入口覆盖当前 Browser Service 的 Playwright/AX/WebMCP/history/export/dialog 等 execute 命令；所有页面访问和敏感动作保留官方 Browser Service 安全检查及 user_confirmed 两阶段确认。
   artifact: 登记、列出或分片读取 MCPX 开发产物。
   screenshot_capture: 按明确 purpose 截取显示器或屏幕区域。
   secret_provide: 按明确 purpose 向当前会话提供仅驻留内存的 Secret。

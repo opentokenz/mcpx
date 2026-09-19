@@ -31,7 +31,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	}
 
 	missingPurpose := mcpresult.Request(map[string]any{
-		"remote_session_id": created.Session.ID, "command": "printf context",
+		"remote_session_id": created.Session.ID, "command": testPrintCommand("context"),
 	})
 
 	missingResult, err := rt.toolCommandExecute(context.Background(), missingPurpose)
@@ -45,7 +45,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 
 	invalidScope := mcpresult.Request(map[string]any{
 		"intent":            "validate command scope",
-		"remote_session_id": created.Session.ID, "command": "printf context",
+		"remote_session_id": created.Session.ID, "command": testPrintCommand("context"),
 		"purpose": "verify context binding", "scope": "host",
 	})
 
@@ -153,7 +153,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 
 	valid := mcpresult.Request(map[string]any{
 		"intent":            "execute the scoped command",
-		"remote_session_id": created.Session.ID, "command": "printf context",
+		"remote_session_id": created.Session.ID, "command": testPrintCommand("context"),
 		"purpose": "verify context binding", "scope": "workspace",
 	})
 

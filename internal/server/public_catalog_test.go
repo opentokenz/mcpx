@@ -12,6 +12,101 @@ import (
 	"testing"
 )
 
+func TestPublicCatalogSchemaTotalBytes(t *testing.T) {
+	runtime := &Runtime{}
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	runtime.registerTools(protocol)
+
+	var nestedDescriptionBytes func(any) int
+	nestedDescriptionBytes = func(value any) int {
+		total := 0
+		switch typed := value.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				if key == "description" {
+					if text, ok := child.(string); ok {
+						total += len([]byte(text))
+					}
+					continue
+				}
+				total += nestedDescriptionBytes(child)
+			}
+		case []any:
+			for _, child := range typed {
+				total += nestedDescriptionBytes(child)
+			}
+		}
+		return total
+	}
+	type schemaSize struct {
+		name                  string
+		inputBytes            int
+		inputDescriptionBytes int
+		outputBytes           int
+		descBytes             int
+	}
+	sizes := make([]schemaSize, 0, len(runtime.listedToolMap()))
+	inputTotal, outputTotal, descTotal := 0, 0, 0
+	for name, tool := range runtime.listedToolMap() {
+		inputSchemaJSON := mcpresult.ToolSchemaJSON(tool)
+		inputBytes := len(inputSchemaJSON)
+		var inputSchema any
+		_ = json.Unmarshal(inputSchemaJSON, &inputSchema)
+		inputDescriptionBytes := nestedDescriptionBytes(inputSchema)
+		outputEncoded, _ := json.Marshal(tool.OutputSchema)
+		outputBytes := len(outputEncoded)
+		descBytes := len([]byte(tool.Description))
+		inputTotal += inputBytes
+		outputTotal += outputBytes
+		descTotal += descBytes
+		sizes = append(sizes, schemaSize{name: name, inputBytes: inputBytes, inputDescriptionBytes: inputDescriptionBytes, outputBytes: outputBytes, descBytes: descBytes})
+	}
+	sort.Slice(sizes, func(i, j int) bool {
+		return sizes[i].inputBytes+sizes[i].outputBytes+sizes[i].descBytes > sizes[j].inputBytes+sizes[j].outputBytes+sizes[j].descBytes
+	})
+	for _, item := range sizes {
+		t.Logf("public tool schema name=%s input=%d input_descriptions=%d output=%d description=%d total=%d", item.name, item.inputBytes, item.inputDescriptionBytes, item.outputBytes, item.descBytes, item.inputBytes+item.outputBytes+item.descBytes)
+	}
+	total := inputTotal + outputTotal + descTotal
+	t.Logf("public tool schema input=%d output=%d description=%d total=%d", inputTotal, outputTotal, descTotal, total)
+	if inputTotal > 70_000 {
+		t.Fatalf("public input schemas exceeded context budget: %d bytes", inputTotal)
+	}
+	if outputTotal > 18_000 {
+		t.Fatalf("public output schemas exceeded context budget: %d bytes", outputTotal)
+	}
+	if total > 90_000 {
+		t.Fatalf("public tool catalog exceeded context budget: %d bytes", total)
+	}
+}
+
+func TestPublicExecuteOmitsSingleValueScopeAndActionRootDescription(t *testing.T) {
+	runtime := &Runtime{}
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	runtime.registerTools(protocol)
+
+	execute := runtime.listedToolMap()["execute"]
+	var executeSchema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(execute), &executeSchema); err != nil {
+		t.Fatal(err)
+	}
+	properties, _ := executeSchema["properties"].(map[string]any)
+	if properties["scope"] != nil {
+		t.Fatalf("public execute schema must not expose single-value scope: %s", mcpresult.ToolSchemaJSON(execute))
+	}
+
+	for name, tool := range runtime.listedToolMap() {
+		var schema map[string]any
+		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tool), &schema); err != nil {
+			t.Fatalf("%s schema: %v", name, err)
+		}
+		rootDescription, _ := schema["description"].(string)
+		if rootDescription != "" && rootDescription == tool.Description {
+			t.Fatalf("%s repeats Tool.Description in InputSchema root", name)
+		}
+	}
+}
+
 func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	runtime := &Runtime{}
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
@@ -20,7 +115,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	want := []string{
 		"workspace", "session", "read", "edit", "move_out", "observe", "progress",
 		"operation_batch", "operation_manage",
-		"execute", "plan", "artifact", "skill_tool", "mcp_tool",
+		"execute", "plan", "artifact", "skill_tool", "mcp_tool", "browser",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
 	}
 	got := make([]string, 0, len(runtime.listedToolMap()))
@@ -127,6 +222,22 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		t.Fatalf("workspace must be a zero-argument catalog query: %s", mcpresult.ToolSchemaJSON(workspaceTool))
 	}
 
+	readTool := runtime.listedToolMap()["read"]
+	var readSchema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(readTool), &readSchema); err != nil {
+		t.Fatal(err)
+	}
+	readProperties, _ := readSchema["properties"].(map[string]any)
+	if readProperties["line_byte_offset"] == nil {
+		t.Fatalf("read schema missing line_byte_offset: %s", mcpresult.ToolSchemaJSON(readTool))
+	}
+	readItemsSchema, _ := readProperties["items"].(map[string]any)
+	readItemSchema, _ := readItemsSchema["items"].(map[string]any)
+	readItemProperties, _ := readItemSchema["properties"].(map[string]any)
+	if readItemProperties["line_byte_offset"] == nil {
+		t.Fatalf("read items schema missing line_byte_offset: %s", mcpresult.ToolSchemaJSON(readTool))
+	}
+
 	editTool := runtime.listedToolMap()["edit"]
 	if editTool.Annotations == nil || editTool.Annotations.ReadOnlyHint || editTool.Annotations.DestructiveHint == nil || *editTool.Annotations.DestructiveHint || !editTool.Annotations.IdempotentHint || editTool.Annotations.OpenWorldHint == nil || *editTool.Annotations.OpenWorldHint {
 		t.Fatalf("edit must expose constrained non-destructive workspace mutation: %+v", editTool.Annotations)
@@ -155,10 +266,13 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	editItems, _ := editProperties["edits"].(map[string]any)
 	itemSchema, _ := editItems["items"].(map[string]any)
 	itemProperties, _ := itemSchema["properties"].(map[string]any)
-	for _, field := range []string{"operation", "path", "base_sha256", "content", "new_path", "replacements", "range"} {
+	for _, field := range []string{"operation", "path", "rev", "content", "new_path", "replacements", "range"} {
 		if itemProperties[field] == nil {
 			t.Fatalf("edit item missing %q: %s", field, mcpresult.ToolSchemaJSON(editTool))
 		}
+	}
+	if itemProperties["base_sha256"] != nil {
+		t.Fatalf("edit item must not expose legacy base_sha256: %s", mcpresult.ToolSchemaJSON(editTool))
 	}
 	moveOutTool := runtime.listedToolMap()["move_out"]
 	if moveOutTool.Annotations == nil || moveOutTool.Annotations.ReadOnlyHint || moveOutTool.Annotations.DestructiveHint == nil || !*moveOutTool.Annotations.DestructiveHint || !moveOutTool.Annotations.IdempotentHint || moveOutTool.Annotations.OpenWorldHint == nil || *moveOutTool.Annotations.OpenWorldHint {
@@ -242,24 +356,24 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	observeProperties, _ := observeSchema["properties"].(map[string]any)
-	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "plan_task_id", "execution_task_id", "keyword", "kinds", "statuses", "created_after", "created_before"} {
+	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "plan_task_id", "execution_task_id", "edit_id", "offset", "keyword", "kinds", "statuses", "created_after", "created_before"} {
 		if observeProperties[field] == nil {
 			t.Fatalf("observe history schema missing %q: %s", field, mcpresult.ToolSchemaJSON(observeTool))
 		}
 	}
-	for _, removed := range []string{"room_id", "task_id", "task_ids", "changeset_ids", "edit_id", "include_diff", "path", "offset"} {
+	for _, removed := range []string{"room_id", "task_id", "task_ids", "changeset_ids", "include_diff", "path"} {
 		if observeProperties[removed] != nil {
 			t.Fatalf("observe schema exposes removed field %q: %s", removed, mcpresult.ToolSchemaJSON(observeTool))
 		}
 	}
 	viewSchema, _ := observeProperties["view"].(map[string]any)
 	viewValues, _ := viewSchema["enum"].([]any)
-	for _, wantView := range []string{"session", "task", "plan", "history", "logs"} {
+	for _, wantView := range []string{"session", "task", "plan", "history", "logs", "diff"} {
 		if !containsSchemaRequired(viewValues, wantView) {
 			t.Fatalf("observe view enum missing %q: %v", wantView, viewValues)
 		}
 	}
-	for _, removedView := range []string{"changes", "diff"} {
+	for _, removedView := range []string{"changes"} {
 		if containsSchemaRequired(viewValues, removedView) {
 			t.Fatalf("observe view enum exposes removed view %q: %v", removedView, viewValues)
 		}
@@ -302,10 +416,11 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		required := branch["required"].([]any)
 		properties := branch["properties"].(map[string]any)
 		action := properties["action"].(map[string]any)
-		for _, key := range []string{"remote_session_id", "action"} {
-			if properties[key] == nil || !containsSchemaRequired(required, key) {
-				t.Fatalf("客户端独立投影 oneOf 分支会丢失必需参数 %s", key)
-			}
+		if properties["remote_session_id"] == nil || containsSchemaRequired(required, "remote_session_id") {
+			t.Fatal("客户端独立投影 oneOf 分支必须保留 optional remote_session_id 覆盖")
+		}
+		if properties["action"] == nil || !containsSchemaRequired(required, "action") {
+			t.Fatal("客户端独立投影 oneOf 分支必须保留必需参数 action")
 		}
 		switch {
 		case containsSchemaRequired(required, "operation_id"):
@@ -331,6 +446,37 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	}
 	if !sawSingle || !sawBatch {
 		t.Fatalf("operation_manage schema branches missing single=%v batch=%v: %s", sawSingle, sawBatch, mcpresult.ToolSchemaJSON(operationManage))
+	}
+}
+
+func TestOneOfBranchDescriptionsAreNotRepeatedFromRoot(t *testing.T) {
+	runtime := &Runtime{}
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	runtime.registerTools(protocol)
+
+	for name, registered := range runtime.listedToolMap() {
+		var schema map[string]any
+		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
+			t.Fatalf("%s schema: %v", name, err)
+		}
+		rootProperties, _ := schema["properties"].(map[string]any)
+		branches, _ := schema["oneOf"].([]any)
+		for branchIndex, rawBranch := range branches {
+			branch, _ := rawBranch.(map[string]any)
+			if strings.TrimSpace(fmt.Sprint(branch["description"])) == "" {
+				t.Fatalf("%s branch %d lost branch purpose description", name, branchIndex)
+			}
+			branchProperties, _ := branch["properties"].(map[string]any)
+			for field, rawBranchProperty := range branchProperties {
+				rootProperty, _ := rootProperties[field].(map[string]any)
+				branchProperty, _ := rawBranchProperty.(map[string]any)
+				rootDescription, _ := rootProperty["description"].(string)
+				branchDescription, _ := branchProperty["description"].(string)
+				if rootDescription != "" && branchDescription == rootDescription {
+					t.Fatalf("%s branch %d field %q repeats root description %q", name, branchIndex, field, rootDescription)
+				}
+			}
+		}
 	}
 }
 

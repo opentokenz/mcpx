@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
 	"mcpx/internal/auth"
 	"mcpx/internal/state"
 )
@@ -39,8 +37,8 @@ func TestCreateListGetAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := uuid.Parse(first.Session.ID); err != nil {
-		t.Fatalf("remote session id is not UUID: %q (%v)", first.Session.ID, err)
+	if !strings.HasPrefix(first.Session.ID, "rs_") || len(first.Session.ID) != 19 {
+		t.Fatalf("remote session id must be compact 96-bit base64url form: %q", first.Session.ID)
 	}
 	second, err := service.Create(context.Background(), owner, in)
 	if err != nil {

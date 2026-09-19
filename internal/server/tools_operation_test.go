@@ -76,7 +76,18 @@ func operationErrorMessage(response map[string]any) string {
 		data, _ := response["data"].(map[string]any)
 		errorBody, _ = data["error"].(map[string]any)
 	}
-	return fmt.Sprint(errorBody["message"])
+	if errorBody != nil {
+		if message := fmt.Sprint(errorBody["message"]); message != "<nil>" && message != "" {
+			return message
+		}
+	}
+	return fmt.Sprint(response["summary"])
+}
+
+func acceptedOperationID(response map[string]any) string {
+	data, _ := response["data"].(map[string]any)
+	id, _ := data["operation_id"].(string)
+	return id
 }
 
 func assertOperationFailed(t *testing.T, response map[string]any) {
@@ -96,11 +107,7 @@ func TestAsyncToolReturnsOperationAndWaitsForResult(t *testing.T) {
 	if accepted["status"] != "accepted" {
 		t.Fatalf("accepted response=%+v", accepted)
 	}
-	data, ok := accepted["data"].(map[string]any)
-	if !ok {
-		t.Fatalf("accepted data=%T", accepted["data"])
-	}
-	operationID, _ := data["operation_id"].(string)
+	operationID := acceptedOperationID(accepted)
 	if operationID == "" {
 		t.Fatalf("missing operation id: %+v", accepted)
 	}
@@ -118,13 +125,12 @@ func TestAsyncCommandOperationWaitsForTerminalTask(t *testing.T) {
 	session := operationTestSession(t, rt, "demo")
 	accepted := callOperationTool(t, rt, "execute", map[string]any{
 		"remote_session_id": session.ID, "purpose": "验证异步命令完成语义", "execution_mode": "async", "action": "run",
-		"command": "sleep 0.2", "yield_time_ms": 1,
+		"command": testSleepCommand(200 * time.Millisecond), "yield_time_ms": 1,
 	})
 	if accepted["status"] != "accepted" {
 		t.Fatalf("accepted response=%+v", accepted)
 	}
-	acceptedData, _ := accepted["data"].(map[string]any)
-	operationID, _ := acceptedData["operation_id"].(string)
+	operationID := acceptedOperationID(accepted)
 	if operationID == "" {
 		t.Fatalf("missing operation id: %+v", accepted)
 	}
@@ -218,8 +224,10 @@ func TestOperationBatchRunsAndRecordsChildSteps(t *testing.T) {
 	if accepted["status"] != "accepted" {
 		t.Fatalf("batch response=%+v", accepted)
 	}
-	data := accepted["data"].(map[string]any)
-	operationID := data["operation_id"].(string)
+	operationID := acceptedOperationID(accepted)
+	if operationID == "" {
+		t.Fatalf("missing operation id: %+v", accepted)
+	}
 	completed := callOperationTool(t, rt, "operation_manage", map[string]any{
 		"remote_session_id": session.ID, "operation_id": operationID, "action": "wait", "timeout_ms": 5000,
 	})
@@ -258,7 +266,10 @@ func TestOperationBatchPublishesBoundedStatisticsForMaxSteps(t *testing.T) {
 	if accepted["status"] != "accepted" {
 		t.Fatalf("batch accepted=%+v", accepted)
 	}
-	operationID := accepted["data"].(map[string]any)["operation_id"].(string)
+	operationID := acceptedOperationID(accepted)
+	if operationID == "" {
+		t.Fatalf("missing operation id: %+v", accepted)
+	}
 	completed := callOperationTool(t, rt, "operation_manage", map[string]any{
 		"remote_session_id": session.ID, "operation_id": operationID, "action": "wait", "timeout_ms": 30000,
 	})

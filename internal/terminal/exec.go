@@ -7,12 +7,15 @@ import (
 	"time"
 )
 
-// ExecOptions configures a short command run.
+// ExecOptions configures a short command run. When Executable is non-empty,
+// Exec bypasses the shell and launches Executable with Args directly.
 type ExecOptions struct {
-	WorkDir  string
-	Command  string
-	Timeout  time.Duration
-	ExtraEnv []string // KEY=VAL
+	WorkDir    string
+	Command    string
+	Executable string
+	Args       []string
+	Timeout    time.Duration
+	ExtraEnv   []string // KEY=VAL
 }
 
 // Result is the outcome of Exec.
@@ -23,7 +26,8 @@ type Result struct {
 	DurationMs int64  `json:"duration_ms"`
 }
 
-// Exec runs command in WorkDir with optional timeout.
+// Exec runs a command in WorkDir with optional timeout. Shell execution is
+// retained for legacy callers; structured callers should set Executable/Args.
 func Exec(ctx context.Context, opts ExecOptions) (Result, error) {
 	if opts.Timeout <= 0 {
 		opts.Timeout = 120 * time.Second
@@ -31,7 +35,12 @@ func Exec(ctx context.Context, opts ExecOptions) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
-	cmd := commandShell(ctx, opts.Command)
+	var cmd *exec.Cmd
+	if opts.Executable != "" {
+		cmd = exec.CommandContext(ctx, opts.Executable, opts.Args...)
+	} else {
+		cmd = commandShell(ctx, opts.Command)
+	}
 	configureProcess(cmd)
 	cmd.Dir = opts.WorkDir
 	if len(opts.ExtraEnv) > 0 {

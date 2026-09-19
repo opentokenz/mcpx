@@ -21,6 +21,7 @@ func TestWrapToolResultProducesARCSearchEnvelope(t *testing.T) {
 	}, "Context query returned 1 file.")
 	wrapped := WrapToolResult("context_query", ResultContext{
 		RequestID: "req_test", TraceID: "tr_test", SpanID: "sp_test",
+		Context: Context{Activity: &Activity{TurnID: "turn_test", Sequence: 2, State: "preparing_action", Kind: "next", Summary: "继续读取", RelatedCallID: "req_test"}},
 		Timing: Timing{StartedAtMs: 100, ReceivedAtMs: 110, CompletedAtMs: 125,
 			NetworkLatencyMs: 10, ProcessingMs: 15, ServerElapsedMs: 25},
 	}, raw)
@@ -38,9 +39,15 @@ func TestWrapToolResultProducesARCSearchEnvelope(t *testing.T) {
 		t.Fatalf("trace timing = %+v", trace)
 	}
 	structured := wrapped.StructuredContent.(map[string]any)
-	timing := structured["timing"].(map[string]any)
-	if timing["started_at_ms"] != int64(100) || timing["server_received_at_ms"] != int64(110) || timing["server_timestamp_ms"] != int64(125) || timing["network_latency_ms"] != int64(10) || timing["tool_duration_ms"] != int64(15) {
-		t.Fatalf("structured timing = %+v", timing)
+	if structured["timing"] != nil {
+		t.Fatalf("model structured content must not repeat timing: %+v", structured["timing"])
+	}
+	structuredContext, _ := structured["context"].(map[string]any)
+	if structuredContext["activity"] != nil {
+		t.Fatalf("model structured content must not repeat activity snapshot: %+v", structuredContext["activity"])
+	}
+	if structured["hints"] != nil {
+		t.Fatalf("normal success must not expose presentation-only hints: %+v", structured["hints"])
 	}
 	result := mcpx["result"].(map[string]any)
 	if result["type"] != "search_result" || result["schema"] != SchemaSearchResult {
@@ -189,8 +196,11 @@ func TestWrapToolResultKeepsHumanTextAndModelStructuredContent(t *testing.T) {
 	if !ok {
 		t.Fatalf("models need structuredContent, got %#v", written.StructuredContent)
 	}
-	if sc["status"] == nil || sc["type"] == nil || sc["context"] == nil || sc["timing"] == nil || sc["data"] == nil {
-		t.Fatalf("structuredContent must expose status/type/context/timing/data: %#v", sc)
+	if sc["status"] == nil || sc["type"] == nil || sc["context"] == nil || sc["data"] == nil {
+		t.Fatalf("structuredContent must expose status/type/context/data: %#v", sc)
+	}
+	if sc["timing"] != nil {
+		t.Fatalf("structuredContent must not repeat timing kept in ARC metadata: %#v", sc["timing"])
 	}
 	data, _ := sc["data"].(map[string]any)
 	if data["value"] != "ready" {
@@ -243,16 +253,23 @@ func TestWrapToolResultExposesActivityV2ContextToARCAndHumanText(t *testing.T) {
 			t.Fatalf("context[%q]=%v, want %q", key, context[key], want)
 		}
 	}
-	activity, ok := context["activity"].(map[string]any)
+	if context["activity"] != nil {
+		t.Fatalf("model context must not repeat activity snapshot: %#v", context["activity"])
+	}
+	envelope := decodeEnvelope(t, written)
+	mcpx, _ := envelope["mcpx"].(map[string]any)
+	result, _ := mcpx["result"].(map[string]any)
+	metadataContext, _ := result["context"].(map[string]any)
+	activity, ok := metadataContext["activity"].(map[string]any)
 	if !ok {
-		t.Fatalf("activity=%#v", context["activity"])
+		t.Fatalf("ARC metadata activity=%#v", metadataContext["activity"])
 	}
 	for key, want := range map[string]any{
-		"turn_id": "turn-42", "sequence": int64(7), "state": "reviewing_result", "kind": "evidence",
+		"turn_id": "turn-42", "sequence": float64(7), "state": "reviewing_result", "kind": "evidence",
 		"summary": "已确认 ARC 仍使用旧 narration 字段", "related_call_id": "call-read-1",
 	} {
 		if activity[key] != want {
-			t.Fatalf("activity[%q]=%v, want %v", key, activity[key], want)
+			t.Fatalf("ARC metadata activity[%q]=%v, want %v", key, activity[key], want)
 		}
 	}
 	for _, forbidden := range []string{"goal", "task_id", "reasoning_summary", "progress_summary", "next_step"} {
@@ -293,8 +310,50 @@ func TestWrapToolResultMapsSemanticConfirmationWithoutApprovalAction(t *testing.
 	if result["hints"].(map[string]any)["preferred_behavior"] != "ask_confirm" {
 		t.Fatalf("hints = %+v", result["hints"])
 	}
+	structuredConfirmation, _ := wrapped.StructuredContent.(map[string]any)
+	structuredHints, _ := structuredConfirmation["hints"].(Hints)
+	if structuredHints.PreferredBehavior != "ask_confirm" {
+		t.Fatalf("model confirmation hint missing: %+v", structuredConfirmation)
+	}
 	if _, exists := result["actions"]; exists {
 		t.Fatalf("semantic confirmation must not create an approval action: %+v", result["actions"])
+	}
+	structuredData, _ := structuredConfirmation["data"].(map[string]any)
+	if structuredData["confirmation_token"] != "ct_full_token_1234567890abcdef" || structuredData["command"] != "go test ./..." {
+		t.Fatalf("semantic confirmation credentials must remain in model-facing data: %+v", structuredData)
+	}
+	if _, exists := structuredConfirmation["actions"]; exists {
+		t.Fatalf("semantic confirmation must not expose an automatic model action: %+v", structuredConfirmation)
+	}
+}
+
+func TestWrapToolResultCanonicalizesAllRecoveryActions(t *testing.T) {
+	raw := mcpresult.NewText(`{"status":"failed","data":{"path":"demo.go","next_action":{"tool":"read","arguments":{"path":"demo.go","view":"file"}}},"error":{"code":"STALE_REVISION","message":"stale","category":"conflict","retryable":true,"recovery":{"action":"read","tool":"read","arguments":{"path":"demo.go","view":"file"}},"details":{"current_sha256":"sha256:new","recovery":"refresh and retry","suggested_next":{"tool":"read","arguments":{"path":"demo.go","view":"file"}},"next_actions":[{"tool":"read","arguments":{"path":"demo.go","view":"file"}},{"tool":"edit","arguments":{"path":"demo.go","apply":false}}]}}}`)
+	wrapped := WrapToolResult("edit", ResultContext{}, raw)
+	structured := wrapped.StructuredContent.(map[string]any)
+	data := structured["data"].(map[string]any)
+	if data["path"] != "demo.go" || data["next_action"] != nil {
+		t.Fatalf("model data must keep business facts without recovery duplication: %+v", data)
+	}
+	errBody := structured["error"].(map[string]any)
+	if errBody["recovery"] != nil {
+		t.Fatalf("model error must not duplicate recovery: %+v", errBody)
+	}
+	details := errBody["details"].(map[string]any)
+	for _, key := range []string{"recovery", "suggested_next", "next_action", "next_actions"} {
+		if details[key] != nil {
+			t.Fatalf("model error details still contain recovery field %q: %+v", key, details)
+		}
+	}
+	if details["current_sha256"] != "sha256:new" {
+		t.Fatalf("error fact was lost: %+v", details)
+	}
+	actions, _ := structured["actions"].([]Action)
+	if len(actions) != 2 {
+		t.Fatalf("all distinct recovery actions must survive canonicalization: %+v", structured["actions"])
+	}
+	if actions[0].ID != "read" || actions[1].ID != "edit_2" {
+		t.Fatalf("canonical recovery actions=%+v", actions)
 	}
 }
 
@@ -347,9 +406,10 @@ func TestWrapToolResultPreservesNonTextContent(t *testing.T) {
 
 func TestOutputSchemaAndRegistry(t *testing.T) {
 	rawOutputSchema := OutputSchema()
-	if len(rawOutputSchema) > 4096 {
+	if len(rawOutputSchema) > 1024 {
 		t.Fatalf("output schema is too large for repeated tools/list exposure: %d bytes", len(rawOutputSchema))
 	}
+	t.Logf("structured output schema bytes=%d", len(rawOutputSchema))
 	var schema map[string]any
 	if err := json.Unmarshal(rawOutputSchema, &schema); err != nil {
 		t.Fatal(err)
@@ -358,20 +418,19 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 		t.Fatalf("schema id = %v", schema["$id"])
 	}
 	required, _ := schema["required"].([]any)
-	for _, field := range []any{"status", "type", "context", "timing", "data"} {
+	for _, field := range []any{"status", "type", "context", "data"} {
 		if !containsAny(required, field) {
 			t.Fatalf("output schema missing required %v: %v", field, required)
 		}
 	}
 	properties, _ := schema["properties"].(map[string]any)
-	if properties["context"] == nil || properties["timing"] == nil || properties["data"] == nil {
-		t.Fatalf("structured output schema missing context/timing/data: %+v", properties)
+	if properties["context"] == nil || properties["data"] == nil || properties["timing"] != nil {
+		t.Fatalf("structured output schema must expose context/data without timing: %+v", properties)
 	}
 	contextSchema, _ := properties["context"].(map[string]any)
 	contextProperties, _ := contextSchema["properties"].(map[string]any)
-	activitySchema, _ := contextProperties["activity"].(map[string]any)
-	if activitySchema == nil {
-		t.Fatalf("ARC V2 context schema must expose activity: %+v", contextSchema)
+	if contextProperties["activity"] != nil {
+		t.Fatalf("model output schema must not expose activity snapshot: %+v", contextSchema)
 	}
 	for _, forbidden := range []string{"reasoning_summary", "progress_summary", "next_step"} {
 		if contextProperties[forbidden] != nil {
@@ -405,10 +464,13 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 	codeChangeProperties, _ := codeChangeSchema["properties"].(map[string]any)
 	dataSchema, _ := codeChangeProperties["data"].(map[string]any)
 	codeChangeProperties, _ = dataSchema["properties"].(map[string]any)
-	for _, field := range []string{"edit_id", "status", "results", "total_changed_lines", "diff_summary"} {
+	for _, field := range []string{"edit_id", "status", "results", "total_changed_lines"} {
 		if codeChangeProperties[field] == nil {
 			t.Fatalf("code change schema missing %s: %+v", field, codeChangeSchema)
 		}
+	}
+	if codeChangeProperties["diff_summary"] != nil {
+		t.Fatalf("code change schema must not expose duplicate diff_summary: %+v", codeChangeSchema)
 	}
 	for _, legacy := range []string{"changeset_id", "digest", "expected_digest", "files"} {
 		if codeChangeProperties[legacy] != nil {

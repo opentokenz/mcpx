@@ -163,7 +163,7 @@ func TestEditSchemaIsSelfDescribingAndFlat(t *testing.T) {
 	edits := properties["edits"].(map[string]any)
 	items := edits["items"].(map[string]any)
 	itemProperties := items["properties"].(map[string]any)
-	for _, field := range []string{"operation", "path", "base_sha256", "content", "new_path", "replacements"} {
+	for _, field := range []string{"operation", "path", "rev", "content", "new_path", "replacements"} {
 		fieldSchema, ok := itemProperties[field].(map[string]any)
 		if !ok || strings.TrimSpace(fieldSchema["description"].(string)) == "" {
 			t.Fatalf("edit item field %q is not self describing", field)

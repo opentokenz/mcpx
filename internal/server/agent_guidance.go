@@ -183,7 +183,7 @@ func normalizePublicAction(tool string, arguments map[string]any) (string, map[s
 
 func isCleanPublicTool(tool string) bool {
 	switch tool {
-	case "session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "artifact", "skill_tool", "mcp_tool",
+	case "session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "artifact", "skill_tool", "mcp_tool", "browser",
 		"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide":
 		return true
 	default:

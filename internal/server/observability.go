@@ -22,8 +22,8 @@ import (
 func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler) {
 	tool = withEmbeddedActivitySchema(tool)
 	// OutputSchema describes structuredContent, not the larger ARC metadata
-	// envelope. The shared ARC contract stays identical across tools while
-	// hard limits are attached from the same source used by runtime capabilities.
+	// envelope. mcp_tool uses a permissive schema because its call action
+	// forwards arbitrary upstream structuredContent unchanged.
 	tool.OutputSchema = outputSchemaForTool(tool.Name)
 	instrumented := r.instrumentTool(tool.Name, handler)
 	if r.toolHandlers == nil {
@@ -156,6 +156,11 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		}
 		internalOperationStep := isOperationChild(callCtx)
 		observationRequest, observationParseErr := r.parseEnv(callCtx, req)
+		if observationParseErr == nil && name != "session" && strings.TrimSpace(observationRequest.RemoteSessionID) == "" {
+			if principal, principalErr := r.principalFromContext(callCtx); principalErr == nil {
+				observationRequest.RemoteSessionID = r.boundRemoteSessionID(callCtx, principal)
+			}
+		}
 		if observationParseErr == nil {
 			r.touchRemoteSessionActivity(callCtx, observationRequest)
 		}
@@ -198,6 +203,14 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 				result.IsError = true
 			}
 		}
+		// When this MCP transport already carries the Remote Session binding, keep
+		// the session identifier out of model-facing business data and continuation
+		// arguments. Explicit remote_session_id calls keep their original payload.
+		if name != "session" && runtime.TransportSessionID != "" {
+			if _, explicit := arguments["remote_session_id"]; !explicit && result != nil {
+				stripModelRemoteSessionIDs(result.StructuredContent)
+			}
+		}
 		// Wrap first so host-visible content is the human summary; observation
 		// then snapshots that text only (never full structuredContent dump).
 		// ARC V2 semantic narration comes only from the durable Activity channel;
@@ -208,7 +221,7 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 				RequestID: runtime.RequestID, TraceID: runtime.TraceID, SpanID: runtime.SpanID,
 				Context: arc.Context{
 					Purpose: firstSemanticPurpose(observationRequest), Activity: activity,
-					PlanID: observationRequest.PlanID, PlanTaskID: observationRequest.PlanTaskID, ExecutionTaskID: observationRequest.ExecutionTaskID, OperationID: observationRequest.OperationID,
+					PlanID: observationRequest.PlanID, PlanTaskID: observationRequest.PlanTaskID, ExecutionTaskID: observationRequest.ExecutionTaskID,
 				},
 				Timing: arc.Timing{
 					StartedAtMs: timing.StartedAtMs, ReceivedAtMs: timing.ReceivedAtMs,
@@ -224,6 +237,24 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 			logToolCall(name, runtime, status, timing)
 		}
 		return result, err
+	}
+}
+
+func stripModelRemoteSessionIDs(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		delete(typed, "remote_session_id")
+		for _, child := range typed {
+			stripModelRemoteSessionIDs(child)
+		}
+	case []any:
+		for _, child := range typed {
+			stripModelRemoteSessionIDs(child)
+		}
+	case []map[string]any:
+		for _, child := range typed {
+			stripModelRemoteSessionIDs(child)
+		}
 	}
 }
 

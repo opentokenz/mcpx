@@ -207,9 +207,16 @@ func TestInstrumentToolExpandsEmbeddedActivityBeforeBusinessCall(t *testing.T) {
 
 	structured, _ := result.StructuredContent.(map[string]any)
 	semantic, _ := structured["context"].(map[string]any)
-	activity, _ := semantic["activity"].(map[string]any)
+	if semantic["activity"] != nil {
+		t.Fatalf("model result repeated activity snapshot: %+v", semantic["activity"])
+	}
+	envelope := decodeARCEnvelope(t, result)
+	mcpx, _ := envelope["mcpx"].(map[string]any)
+	arcResult, _ := mcpx["result"].(map[string]any)
+	arcContext, _ := arcResult["context"].(map[string]any)
+	activity, _ := arcContext["activity"].(map[string]any)
 	if activity["kind"] != "next" || fmt.Sprint(activity["sequence"]) != "3" || activity["turn_id"] != turnID || activity["related_call_id"] != relatedCallID {
-		t.Fatalf("ARC did not read persisted embedded activity snapshot: %+v", activity)
+		t.Fatalf("ARC metadata lost persisted embedded activity snapshot: %+v", activity)
 	}
 }
 
@@ -324,9 +331,16 @@ func TestInstrumentToolCarriesEmbeddedActivitySnapshotToARCV2(t *testing.T) {
 	if !ok {
 		t.Fatalf("context=%#v", structured["context"])
 	}
-	activity, ok := semantic["activity"].(map[string]any)
+	if semantic["activity"] != nil {
+		t.Fatalf("model context must not repeat Activity snapshot: %+v", semantic)
+	}
+	envelope := decodeARCEnvelope(t, result)
+	mcpx, _ := envelope["mcpx"].(map[string]any)
+	arcResult, _ := mcpx["result"].(map[string]any)
+	metadataContext, _ := arcResult["context"].(map[string]any)
+	activity, ok := metadataContext["activity"].(map[string]any)
 	if !ok || activity["kind"] != "evidence" || activity["summary"] != "已确认服务端读取真实 Activity snapshot" || activity["related_call_id"] == "" {
-		t.Fatalf("ARC activity=%+v context=%+v", activity, semantic)
+		t.Fatalf("ARC metadata activity=%+v context=%+v", activity, metadataContext)
 	}
 	for _, forbidden := range []string{"goal", "task_id", "reasoning_summary", "progress_summary", "next_step"} {
 		if _, exists := semantic[forbidden]; exists {

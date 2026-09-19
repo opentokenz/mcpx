@@ -39,8 +39,8 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	commandProperties := commandSchema["properties"].(map[string]any)
-	if commandProperties["remote_session_id"] == nil || commandProperties["purpose"] == nil || commandProperties["scope"] == nil || commandProperties["user_confirmed"] == nil {
-		t.Fatalf("execute schema must expose the clean-core semantic fields: %+v", commandProperties)
+	if commandProperties["remote_session_id"] == nil || commandProperties["purpose"] == nil || commandProperties["user_confirmed"] == nil || commandProperties["scope"] != nil {
+		t.Fatalf("execute schema must expose clean-core semantic fields without single-value scope: %+v", commandProperties)
 	}
 	for _, name := range []string{"skill_tool", "mcp_tool"} {
 		var extensionSchema map[string]any

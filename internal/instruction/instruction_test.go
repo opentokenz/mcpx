@@ -69,14 +69,14 @@ func TestDiscoverSkipsSymlinkAndOversizedDocuments(t *testing.T) {
 	if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, filepath.Join(root, "AGENTS.md")); err != nil {
-		t.Fatal(err)
-	}
-	if documents := Discover("", root, 1024); len(documents) != 0 {
-		t.Fatalf("symlink must not be exposed: %+v", documents)
-	}
-	if err := os.Remove(filepath.Join(root, "AGENTS.md")); err != nil {
-		t.Fatal(err)
+	symlink := filepath.Join(root, "AGENTS.md")
+	if err := os.Symlink(target, symlink); err == nil {
+		if documents := Discover("", root, 1024); len(documents) != 0 {
+			t.Fatalf("symlink must not be exposed: %+v", documents)
+		}
+		if err := os.Remove(symlink); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("too large"), 0o600); err != nil {
 		t.Fatal(err)

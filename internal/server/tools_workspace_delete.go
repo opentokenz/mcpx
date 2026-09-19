@@ -252,7 +252,7 @@ type moveOutTargetResult struct {
 
 func (r *Runtime) commitMoveOutManifest(ctx context.Context, envReq envelope.Request, principal auth.Principal, session remotesession.Session, item deletion.Request) moveOutCommitResult {
 	result := moveOutCommitResult{
-		MoveRequestID: item.ID, ManifestSHA256: item.ManifestSHA256, MoveID: newRuntimeID("move", 12), AuditEventID: newRuntimeID("audit", 12),
+		MoveRequestID: item.ID, ManifestSHA256: item.ManifestSHA256, MoveID: newOpaqueID("move", 12), AuditEventID: newOpaqueID("audit", 12),
 		Targets: make([]moveOutTargetResult, 0, len(item.Manifest.Targets)), MovedBytesKnown: true, Reversible: true,
 	}
 
@@ -585,6 +585,10 @@ func parseMoveOutTargets(payload map[string]any) ([]deletion.Target, error) {
 		targets[i].Path = canonical
 		targets[i].Kind = ""
 		targets[i].ExpectedSHA256 = normalizeSHA(targets[i].ExpectedSHA256)
+		targets[i].Revision = strings.TrimSpace(targets[i].Revision)
+		if targets[i].Revision != "" && targets[i].ExpectedSHA256 != "" {
+			return nil, fmt.Errorf("targets[%d]: rev and expected_sha256 are mutually exclusive", i)
+		}
 		if seen[canonical] {
 			return nil, fmt.Errorf("duplicate move-out target %q", canonical)
 		}
@@ -603,22 +607,44 @@ func (r *Runtime) inferMoveOutTargetKinds(session remotesession.Session, targets
 	cfg := r.effectiveConfig(session.WorkspacePath)
 	resolved := append([]deletion.Target(nil), targets...)
 	for i := range resolved {
-		_, info, err := lstatMoveOutTarget(session.WorkspacePath, resolved[i].Path, cfg)
+		lexical, info, err := lstatMoveOutTarget(session.WorkspacePath, resolved[i].Path, cfg)
 		if err != nil {
 			return nil, err
 		}
 		switch {
 		case info.Mode()&os.ModeSymlink != 0:
 			resolved[i].Kind = "symlink"
+			if resolved[i].Revision != "" {
+				linkTarget, readErr := os.Readlink(lexical)
+				if readErr != nil {
+					return nil, &moveOutValidationError{Code: "SYMLINK_READ_FAILED", Message: readErr.Error(), Path: resolved[i].Path}
+				}
+				actual := digestBytes([]byte(linkTarget))
+				if compactFileRevision(actual) != resolved[i].Revision {
+					return nil, &moveOutValidationError{Code: "STALE_REVISION", Message: "rev does not match current symlink text", Path: resolved[i].Path, CurrentSHA: actual}
+				}
+				resolved[i].ExpectedSHA256, resolved[i].Revision = actual, ""
+			}
 		case info.IsDir():
 			resolved[i].Kind = "directory"
-			if resolved[i].ExpectedSHA256 != "" {
-				return nil, &moveOutValidationError{Code: "INVALID_REQUEST", Message: "expected_sha256 is not supported for directory; directory contents are intentionally not enumerated", Path: resolved[i].Path}
+			if resolved[i].ExpectedSHA256 != "" || resolved[i].Revision != "" {
+				return nil, &moveOutValidationError{Code: "INVALID_REQUEST", Message: "revision guard is not supported for directory; directory contents are intentionally not enumerated", Path: resolved[i].Path}
 			}
 		case info.Mode().IsRegular():
 			resolved[i].Kind = "file"
+			if resolved[i].Revision != "" {
+				content, readErr := os.ReadFile(lexical)
+				if readErr != nil {
+					return nil, &moveOutValidationError{Code: "FILE_READ_FAILED", Message: readErr.Error(), Path: resolved[i].Path}
+				}
+				actual := digestBytes(content)
+				if compactFileRevision(actual) != resolved[i].Revision {
+					return nil, &moveOutValidationError{Code: "STALE_REVISION", Message: "rev does not match current file", Path: resolved[i].Path, CurrentSHA: actual}
+				}
+				resolved[i].ExpectedSHA256, resolved[i].Revision = actual, ""
+			}
 			if resolved[i].ExpectedSHA256 == "" {
-				return nil, &moveOutValidationError{Code: "INVALID_REQUEST", Message: "expected_sha256 from read is required for regular files", Path: resolved[i].Path}
+				return nil, &moveOutValidationError{Code: "INVALID_REQUEST", Message: "rev from read is required for regular files (legacy expected_sha256 also accepted)", Path: resolved[i].Path}
 			}
 		default:
 			return nil, &moveOutValidationError{Code: "MOVE_OUT_FILE_ONLY", Message: "only regular files, directories or symlink entries can be moved out", Path: resolved[i].Path}
@@ -823,7 +849,9 @@ func moveOutErrorDetails(err error) map[string]any {
 	}
 	details := map[string]any{"path": validation.Path}
 	if validation.CurrentSHA != "" {
-		details["current_sha256"] = validation.CurrentSHA
+		if rev := compactFileRevision(validation.CurrentSHA); rev != "" {
+			details["current_rev"] = rev
+		}
 	}
 	return details
 }

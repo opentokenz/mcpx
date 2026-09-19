@@ -257,7 +257,10 @@ func TestReviewCancelStopsActualTaskAndFreezesTerminal(t *testing.T) {
 	if accepted["status"] != "accepted" {
 		t.Fatalf("未提交: %+v", accepted)
 	}
-	id := accepted["data"].(map[string]any)["operation_id"].(string)
+	id := acceptedOperationID(accepted)
+	if id == "" {
+		t.Fatalf("operation id missing: %+v", accepted)
+	}
 	deadline := time.Now().Add(time.Second)
 	for {
 		if _, err := os.Stat(started); err == nil {

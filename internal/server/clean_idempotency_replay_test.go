@@ -112,7 +112,7 @@ for line in sys.stdin:
 	}
 	startLog := filepath.Join(t.TempDir(), "fake-mcp-starts.log")
 	if err := config.WriteMCPFile(config.ProjectMCPPath(workspacePath), config.MCPFile{MCPServers: map[string]config.MCPServer{
-		"fake": {Description: "Echo values for contract tests", Command: "python3", Args: []string{script}, Env: map[string]string{"MCPX_TEST_START_LOG": startLog}},
+		"fake": testMCPServer(t, "Echo values for contract tests", script, map[string]string{"MCPX_TEST_START_LOG": startLog}),
 	}}); err != nil {
 		t.Fatal(err)
 	}

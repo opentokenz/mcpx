@@ -124,6 +124,7 @@ func TestExecPipelineAllowConfirmDeny(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = rt.Close() })
 	eff := rt.effectiveConfig(ws)
 	if security.MatchCommand(eff.Security.Commands, "echo hi") != security.Allow {
 		t.Fatal("allow")
@@ -159,6 +160,7 @@ func TestTerminalExecRunsAfterSemanticConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = rt.Close() })
 	principal, err := rt.principalFromContext(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -232,6 +234,7 @@ func TestTerminalStartUsesCommandPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = rt.Close() })
 	principal, err := rt.principalFromContext(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -282,6 +285,7 @@ func TestRequireAuthBearerFromContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = rt.Close() })
 	// missing header
 	if _, err := rt.principalFromContext(context.Background()); err == nil {
 		t.Fatal("expected missing credentials to be rejected")

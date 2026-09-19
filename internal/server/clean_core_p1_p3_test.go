@@ -3,7 +3,7 @@ package server
 import (
 	"context"
 	"os"
-	"os/exec"
+
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,7 +23,7 @@ func TestCleanCoreExecuteIdempotencyAndUserConfirmation(t *testing.T) {
 
 	request := map[string]any{
 		"action": "run", "remote_session_id": remoteID, "purpose": "run a stable command",
-		"command": "printf stable", "scope": "workspace", "idempotency_key": "execute-replay-1",
+		"command": testPrintCommand("stable"), "scope": "workspace", "idempotency_key": "execute-replay-1",
 	}
 	first := callEnvelope(t, rt.toolExecute, context.Background(), request)
 	if !statusOK(first) {
@@ -41,7 +41,7 @@ func TestCleanCoreExecuteIdempotencyAndUserConfirmation(t *testing.T) {
 		t.Fatalf("execute retry did not replay=%+v", replay)
 	}
 	conflictRequest := cloneMap(request)
-	conflictRequest["command"] = "printf changed"
+	conflictRequest["command"] = testPrintCommand("changed")
 	conflict := callEnvelope(t, rt.toolExecute, context.Background(), conflictRequest)
 	if statusOK(conflict) || errorCode(conflict) != "idempotency_conflict" {
 		t.Fatalf("execute conflict=%+v", conflict)
@@ -115,7 +115,8 @@ func TestCleanCoreMissingCommandUsesExecutionTaxonomy(t *testing.T) {
 		"action": "run", "remote_session_id": remoteID, "purpose": "classify a missing executable",
 		"command": "mcpx-command-that-does-not-exist", "scope": "workspace",
 	})
-	if statusOK(response) || errorCode(response) != "command_not_found" {
+	wantMissingCode, wantMissingExit := testShellMissingCommandOutcome()
+	if statusOK(response) || errorCode(response) != wantMissingCode {
 		t.Fatalf("missing command response=%+v", response)
 	}
 	errorBody, _ := response["error"].(map[string]any)
@@ -123,7 +124,7 @@ func TestCleanCoreMissingCommandUsesExecutionTaxonomy(t *testing.T) {
 		t.Fatalf("missing command taxonomy=%+v", errorBody)
 	}
 	details, _ := errorBody["details"].(map[string]any)
-	if details["exit_code"] != float64(127) {
+	if details["exit_code"] != wantMissingExit {
 		t.Fatalf("missing command exit code=%+v", details)
 	}
 
@@ -150,7 +151,7 @@ func TestCleanCoreMissingCommandUsesExecutionTaxonomy(t *testing.T) {
 		t.Fatalf("async operation taxonomy=%+v", operationError)
 	}
 	operationDetails, _ := operationError["details"].(map[string]any)
-	if operationDetails["exit_code"] != float64(127) {
+	if operationDetails["exit_code"] != wantMissingExit {
 		t.Fatalf("async operation exit code=%+v", operationDetails)
 	}
 }
@@ -196,10 +197,10 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 		t.Fatalf("plan advance=%+v", advanced)
 	}
 
-	base := digestForTest([]byte("before\n"))
+	base := compactFileRevision(digestForTest([]byte("before\n")))
 	edited := callEnvelope(t, rt.toolEdit, context.Background(), map[string]any{
 		"remote_session_id": remoteID, "purpose": "apply the tracked edit", "idempotency_key": "plan-edit-1",
-		"edits": []any{map[string]any{"path": "plan.txt", "operation": "update", "base_sha256": base,
+		"edits": []any{map[string]any{"path": "plan.txt", "operation": "update", "rev": base,
 			"replacements": []any{map[string]any{"match": "before", "replacement": "after"}}}},
 	})
 	if !statusOK(edited) {
@@ -208,7 +209,7 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 	editID := edited["data"].(map[string]any)["edit_id"].(string)
 
 	executed := callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
-		"action": "run", "remote_session_id": remoteID, "purpose": "run the tracked verification", "command": "sleep 0.05",
+		"action": "run", "remote_session_id": remoteID, "purpose": "run the tracked verification", "command": testSleepCommand(50 * time.Millisecond),
 		"scope": "workspace", "yield_time_ms": 1,
 	})
 	if executed["status"] != "accepted" && !statusOK(executed) {
@@ -220,7 +221,7 @@ func TestCleanCorePlanEvidenceAndArtifactWorkflow(t *testing.T) {
 		t.Fatalf("expected a task for execution evidence=%+v", executeData)
 	}
 	attached := callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
-		"action": "attach", "remote_session_id": remoteID, "purpose": "collect verification output", "execution_task_id": taskIDForEvidence, "yield_time_ms": 1000,
+		"action": "attach", "remote_session_id": remoteID, "purpose": "collect verification output", "execution_task_id": taskIDForEvidence, "yield_time_ms": 3000,
 	})
 	if !statusOK(attached) || attached["data"].(map[string]any)["status"] != "exited" {
 		t.Fatalf("attach=%+v", attached)
@@ -434,7 +435,7 @@ for line in sys.stdin:
 	}
 	startLog := filepath.Join(t.TempDir(), "fake-mcp-starts.log")
 	if err := config.WriteMCPFile(config.ProjectMCPPath(workspace.Path), config.MCPFile{MCPServers: map[string]config.MCPServer{
-		"fake": {Description: "Echo values for contract tests", Command: "python3", Args: []string{script}, Env: map[string]string{"MCPX_TEST_START_LOG": startLog}},
+		"fake": testMCPServer(t, "Echo values for contract tests", script, map[string]string{"MCPX_TEST_START_LOG": startLog}),
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +521,7 @@ for line in sys.stdin:
 		t.Fatal(err)
 	}
 	if err := config.WriteMCPFile(config.ProjectMCPPath(workspace.Path), config.MCPFile{MCPServers: map[string]config.MCPServer{
-		"contract": {Description: "Contract-test MCP server", Command: "python3", Args: []string{script}, Env: map[string]string{"MCPX_TEST_SCHEMA": schemaPath}},
+		"contract": testMCPServer(t, "Contract-test MCP server", script, map[string]string{"MCPX_TEST_SCHEMA": schemaPath}),
 		"offline":  {Description: "Unavailable server", Command: "mcpx-command-that-does-not-exist"},
 	}}); err != nil {
 		t.Fatal(err)
@@ -609,7 +610,8 @@ func fakeMCPStartCount(t *testing.T, path string) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.Count(string(body), "started\n")
+	normalized := strings.ReplaceAll(string(body), "\r\n", "\n")
+	return strings.Count(normalized, "started\n")
 }
 
 func TestEphemeralRuntimeValidatesModeAndRedactsObservation(t *testing.T) {
@@ -634,9 +636,7 @@ func TestEphemeralRuntimeValidatesModeAndRedactsObservation(t *testing.T) {
 }
 
 func TestDetachedExecutionOutcomeIsConsistentAcrossObserveAndAttach(t *testing.T) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 unavailable")
-	}
+	python := testPythonInvocation(t)
 	rt := newWorkspaceRuntime(t, "demo")
 	workspace, _ := rt.reg.Get("demo")
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
@@ -645,8 +645,8 @@ func TestDetachedExecutionOutcomeIsConsistentAcrossObserveAndAttach(t *testing.T
 	start := func(id, script string, wallLimit time.Duration) *terminal.Task {
 		t.Helper()
 		task, err := rt.tasks.StartRemoteProcessWithObservationContext(
-			id, "", "execute", remoteID, "demo", workspace.Path, "python3 -",
-			terminal.ProcessSpec{Executable: "python3", Args: []string{"-"}, Stdin: script, WallLimit: wallLimit},
+			id, "", "execute", remoteID, "demo", workspace.Path, python.Command("-"),
+			terminal.ProcessSpec{Executable: python.Executable, Args: python.Args("-"), Stdin: script, WallLimit: wallLimit},
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -725,11 +725,8 @@ func TestExecutionOutcomeClassification(t *testing.T) {
 }
 
 func TestEphemeralPythonRuntimeExecutesAndKeepsReadableTaskID(t *testing.T) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 unavailable")
-	}
+	_ = testPythonInvocation(t)
 	rt := newWorkspaceRuntime(t, "demo")
-	rt.cfg.Security.Commands.Allow = append(rt.cfg.Security.Commands.Allow, `^python3 -$`)
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
 	result := callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{

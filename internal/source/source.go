@@ -100,9 +100,10 @@ type ReadResult struct {
 }
 
 type BatchReadRequest struct {
-	Path   string `json:"path"`
-	Offset int    `json:"offset"`
-	Limit  int    `json:"limit"`
+	Path           string `json:"path"`
+	Offset         int    `json:"offset"`
+	LineByteOffset int    `json:"line_byte_offset,omitempty"`
+	Limit          int    `json:"limit"`
 }
 
 type BatchReadResult struct {
@@ -399,7 +400,11 @@ func SearchWith(root string, opts SearchOptions, allowed func(string) bool) (Sea
 }
 
 func Read(root, path string, offset, limit int, maxBytes int64) (ReadResult, error) {
-	result, err := file.Read(file.ReadOptions{WorkspaceRoot: root, Path: path, Offset: offset, Limit: limit, MaxBytes: maxBytes})
+	return ReadWindow(root, path, offset, 0, limit, maxBytes)
+}
+
+func ReadWindow(root, path string, offset, lineByteOffset, limit int, maxBytes int64) (ReadResult, error) {
+	result, err := file.Read(file.ReadOptions{WorkspaceRoot: root, Path: path, Offset: offset, LineByteOffset: lineByteOffset, Limit: limit, MaxBytes: maxBytes})
 	if err != nil {
 		return ReadResult{}, err
 	}
@@ -440,7 +445,7 @@ func ReadBatch(root string, requests []BatchReadRequest, maxBytesPerFile int64, 
 			continuations = append(continuations, requests[index:]...)
 			break
 		}
-		result, err := Read(root, request.Path, request.Offset, request.Limit, maxBytesPerFile)
+		result, err := ReadWindow(root, request.Path, request.Offset, request.LineByteOffset, request.Limit, maxBytesPerFile)
 		if err != nil {
 			out.Results = append(out.Results, ReadResult{
 				ReadResult: file.ReadResult{Path: request.Path, Offset: request.Offset, Limit: request.Limit},
@@ -455,11 +460,7 @@ func ReadBatch(root string, requests []BatchReadRequest, maxBytesPerFile int64, 
 			result.Truncated = true
 			out.TotalBytes += len(result.Content)
 			out.Results = append(out.Results, result)
-			continuation := request
-			continuation.Offset += returnedLineCount(result.Content)
-			if continuation.Offset == request.Offset {
-				continuation.Offset++
-			}
+			continuation := advanceBatchReadRequest(request, result.Content)
 			addContinuation(index, continuation)
 			continuations = append(continuations, requests[index+1:]...)
 			break
@@ -467,11 +468,7 @@ func ReadBatch(root string, requests []BatchReadRequest, maxBytesPerFile int64, 
 		out.TotalBytes += len(result.Content)
 		out.Results = append(out.Results, result)
 		if result.Truncated {
-			continuation := request
-			continuation.Offset += returnedLineCount(result.Content)
-			if continuation.Offset == request.Offset {
-				continuation.Offset++
-			}
+			continuation := advanceBatchReadRequest(request, result.Content)
 			addContinuation(index, continuation)
 		}
 	}
@@ -487,8 +484,18 @@ func (result *BatchReadResult) setContinuations(index int, requests []BatchReadR
 	result.ContinueRequests = append(result.ContinueRequests[:0], requests...)
 }
 
-func returnedLineCount(content string) int {
-	return strings.Count(content, "\n")
+func AdvanceReadCursor(offset, lineByteOffset int, content string) (int, int) {
+	completedLines := strings.Count(content, "\n")
+	if completedLines == 0 {
+		return offset, lineByteOffset + len(content)
+	}
+	lastNewline := strings.LastIndexByte(content, '\n')
+	return offset + completedLines, len(content) - lastNewline - 1
+}
+
+func advanceBatchReadRequest(request BatchReadRequest, content string) BatchReadRequest {
+	request.Offset, request.LineByteOffset = AdvanceReadCursor(request.Offset, request.LineByteOffset, content)
+	return request
 }
 
 func truncateUTF8(value string, maxBytes int) string {

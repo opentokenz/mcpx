@@ -22,13 +22,13 @@ var cleanEditSafetyMeta = mcp.Meta{
 		"approval":          "web_model_user_confirmation_required_for_move_out",
 		"scope":             "registered_workspace_root",
 		"target":            "regular_files_only_for_create_update_rename",
-		"revision_guard":    "sha256",
+		"revision_guard":    "compact_rev",
 		"symlink_policy":    "reject",
 		"idempotency":       "supported",
 		"audit":             "durable",
 		"execution":         "filesystem_only",
 		"shell_bypass":      "forbidden",
-		"approval_evidence": []string{"purpose", "explicit_paths", "base_sha256", "server_snapshot"},
+		"approval_evidence": []string{"purpose", "explicit_paths", "rev", "server_snapshot"},
 		"server_rejections": []string{"path_escape", "symlink", "non_regular_file", "stale_revision", "file_policy_denied", "move_out_required"},
 	},
 }
@@ -80,6 +80,33 @@ var mcpToolAnnotation = toolAnnotation{
 	}},
 }
 
+var browserToolAnnotation = toolAnnotation{
+	ReadOnly: false, Destructive: true, Idempotent: false, OpenWorld: true,
+	Meta: mcp.Meta{"mcpx/action_risk": map[string]any{
+		"status":       riskDescriptor(true, false, true, true, "local_browser_extension_status"),
+		"tabs":         riskDescriptor(true, false, true, true, "local_browser_tab_metadata_read"),
+		"claim":        riskDescriptor(false, false, true, true, "browser_session_tab_claim"),
+		"agent_tabs":   riskDescriptor(true, false, true, true, "browser_session_tab_read"),
+		"get_tab":      riskDescriptor(true, false, true, true, "browser_session_tab_read"),
+		"create_tab":   riskDescriptor(false, false, false, true, "browser_tab_create"),
+		"close_tab":    riskDescriptor(false, true, false, true, "browser_tab_close"),
+		"navigate":     riskDescriptor(false, true, false, true, "browser_navigation_open_world"),
+		"back":         riskDescriptor(false, false, false, true, "browser_navigation_history"),
+		"forward":      riskDescriptor(false, false, false, true, "browser_navigation_history"),
+		"reload":       riskDescriptor(false, false, false, true, "browser_navigation_reload"),
+		"snapshot":     riskDescriptor(true, false, true, true, "browser_page_dom_read"),
+		"click":        riskDescriptor(false, true, false, true, "browser_page_interaction"),
+		"double_click": riskDescriptor(false, true, false, true, "browser_page_interaction"),
+		"type":         riskDescriptor(false, true, false, true, "browser_page_input"),
+		"keypress":     riskDescriptor(false, true, false, true, "browser_page_input"),
+		"scroll":       riskDescriptor(false, false, false, true, "browser_page_view_change"),
+		"move":         riskDescriptor(false, false, false, true, "browser_pointer_move"),
+		"drag":         riskDescriptor(false, true, false, true, "browser_page_interaction"),
+		"screenshot":   riskDescriptor(true, false, true, true, "browser_page_screenshot_read"),
+		"official":     riskDescriptor(false, true, false, true, "browser_official_dynamic_command"),
+	}},
+}
+
 func riskDescriptor(readOnly, destructive, idempotent, openWorld bool, classification string) map[string]any {
 	return map[string]any{
 		"read_only": readOnly, "destructive": destructive, "idempotent": idempotent,
@@ -94,6 +121,7 @@ func cleanCoreTool(name, description string, properties map[string]any, required
 		"properties":           properties,
 		"additionalProperties": false,
 	}
+	required = withoutBoundSessionRequirement(required)
 	if len(required) > 0 {
 		schema["required"] = required
 	}
@@ -103,7 +131,7 @@ func cleanCoreTool(name, description string, properties map[string]any, required
 
 func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	desc := prompts.MustDescriptions()
-	remoteSession := stringSchema("跨客户端复用的 Remote Session 标识")
+	remoteSession := stringSchema("Remote Session 标识；当前 MCP transport 已绑定 Session 时省略，显式传入可覆盖绑定")
 	workspace := stringSchema("已注册的 Workspace 名称")
 	path := stringSchema("Workspace 内的相对文件路径")
 
@@ -132,10 +160,11 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]any{
-			"path":   path,
-			"mode":   enumSchema("文件读取模式", "window", "full"),
-			"offset": numberSchema("0-based 行偏移"),
-			"limit":  numberSchema("最大行数"),
+			"path":             path,
+			"mode":             enumSchema("文件读取模式", "window", "full"),
+			"offset":           numberSchema("0-based 行偏移"),
+			"line_byte_offset": numberSchema("window 续读时 Offset 行内的模型侧 UTF-8 字节偏移；应原样复用 next_action"),
+			"limit":            numberSchema("最大行数"),
 		},
 		"required": []string{"path"},
 	}, "批量文件读取项")
@@ -152,6 +181,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"path":                 readPath,
 		"mode":                 enumSchema("文件读取模式", "window", "full"),
 		"offset":               numberSchema("0-based 行偏移"),
+		"line_byte_offset":     numberSchema("window 续读时 Offset 行内的模型侧 UTF-8 字节偏移；应原样复用 next_action"),
 		"limit":                numberSchema("行数或结果数量限制"),
 		"items":                readItems,
 		"max_total_bytes":      numberSchema("批量读取总字节预算"),
@@ -179,7 +209,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"properties": map[string]any{
 			"path":           path,
 			"operation":      enumSchema("文件操作；用户提出删除、移除或清理时请使用 move_out(action=prepare)，确认后再 move_out(action=submit)", "create", "update", "rename"),
-			"base_sha256":    stringSchema("update/rename 必填读取时获得的文件 sha256；create 通过目标不存在保护"),
+			"rev":            stringSchema("update/rename 必须；read 返回的 80-bit base64url file revision"),
 			"content":        stringSchema("新文件的完整内容"),
 			"content_base64": stringSchema("完整目标字节的标准 Base64；仅 create/update，须 newline_policy=exact，与 content/replacements/range 互斥"),
 			"newline_policy": enumSchema("preserve 使用现有逻辑文本编辑；exact 原样写入 content_base64 字节，不转换编码/BOM/换行", "preserve", "exact"),
@@ -205,7 +235,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 			"range": map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
-				"description":          "按逻辑行替换 update 范围；start_line/end_line 为 1-based 且包含首尾行，空 replacement 删除这些完整行。必须提供 base_sha256；与 content/replacements 互斥。",
+				"description":          "按逻辑行替换 update 范围；start_line/end_line 为 1-based 且包含首尾行，空 replacement 删除这些完整行。必须提供 rev；与 content/replacements 互斥。",
 				"properties": map[string]any{
 					"start_line":  map[string]any{"type": "integer", "minimum": 1, "description": "起始逻辑行（1-based，包含）"},
 					"end_line":    map[string]any{"type": "integer", "minimum": 1, "description": "结束逻辑行（1-based，包含）"},
@@ -217,7 +247,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"required": []string{"path", "operation"},
 		"allOf": []map[string]any{{
 			"if":   map[string]any{"properties": map[string]any{"operation": map[string]any{"enum": []string{"update", "rename"}}}},
-			"then": map[string]any{"required": []string{"base_sha256"}},
+			"then": map[string]any{"required": []string{"rev"}},
 		}},
 	}
 	r.addTool(s, cleanCoreTool("edit", desc["edit"], map[string]any{
@@ -233,7 +263,8 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"additionalProperties": false,
 		"properties": map[string]any{
 			"path":            path,
-			"expected_sha256": stringSchema("普通文件必填从 read 获得的 SHA-256 revision guard；目录省略；symlink 可选，prepare 会冻结链接文本摘要。目标类型由 Runtime 安全推导。"),
+			"rev":             stringSchema("普通文件首选；read 返回的 compact file revision。目录省略；Runtime 会在冻结 manifest 前恢复完整 SHA"),
+			"expected_sha256": stringSchema("兼容旧客户端的完整 SHA-256 revision guard；新调用优先使用 rev"),
 		},
 		"required": []string{"path"},
 	}
@@ -266,7 +297,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	r.addTool(s, cleanCoreTool("observe", desc["observe"], map[string]any{
 		"remote_session_id":  remoteSession,
 		"workspace":          workspace,
-		"view":               enumSchema("观察视图；省略时 Runtime 仅在目标唯一时推导，完全无目标参数时默认为 session", "session", "task", "plan", "history", "logs"),
+		"view":               enumSchema("观察视图；省略时 Runtime 仅在目标唯一时推导，完全无目标参数时默认为 session", "session", "task", "plan", "history", "logs", "diff"),
 		"limit":              numberSchema("返回数量限制"),
 		"cursor":             stringSchema("分页游标"),
 		"call_id":            stringSchema("按调用关联 ID 过滤 history"),
@@ -282,6 +313,8 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"created_before":     stringSchema("仅返回此时间之前的事件；支持 RFC3339、YYYY-MM-DD 或 Unix 毫秒"),
 		"plan_task_id":       stringSchema("Plan Task ID；view=plan 时使用，也可用于 history 过滤"),
 		"execution_task_id":  stringSchema("执行 Task ID；view=task/logs 时使用，也可用于 history 过滤"),
+		"edit_id":            stringSchema("Edit ID；view=diff 时使用"),
+		"offset":             numberSchema("view=diff 的 UTF-8 字节偏移；可原样使用服务端 next_action 返回值"),
 		"stdout_offset":      numberSchema("view=logs 的 stdout 字节偏移；可原样使用服务端 next_action 返回值"),
 		"stderr_offset":      numberSchema("view=logs 的 stderr 字节偏移；可原样使用服务端 next_action 返回值"),
 	}, []string{"remote_session_id"}, readOnlyToolAnnotation), r.toolObserve)

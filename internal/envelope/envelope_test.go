@@ -80,6 +80,30 @@ func TestCommandFailuresUseExecutionTaxonomy(t *testing.T) {
 	}
 }
 
+func TestBrowserErrorsUseActionableTaxonomy(t *testing.T) {
+	for _, test := range []struct {
+		code         string
+		category     string
+		retryable    bool
+		hintContains string
+	}{
+		{code: "BROWSER_NODE_STALE", category: "conflict", retryable: true, hintContains: "browser snapshot"},
+		{code: "BROWSER_ATTACHMENT_STALE", category: "conflict", retryable: false, hintContains: "reconnect"},
+		{code: "BROWSER_TAB_NOT_FOUND", category: "not_found", retryable: false, hintContains: "browser tab list"},
+	} {
+		t.Run(test.code, func(t *testing.T) {
+			response := Fail(StatusError, "req1", "demo", nil, test.code, "browser action failed")
+			if response.Error == nil || response.Error.Category != test.category || response.Error.Retryable != test.retryable {
+				t.Fatalf("unexpected %s classification: %+v", test.code, response.Error)
+			}
+			hint, _ := response.Error.Details["retry_hint"].(string)
+			if !strings.Contains(strings.ToLower(hint), test.hintContains) {
+				t.Fatalf("unexpected %s retry hint: %q", test.code, hint)
+			}
+		})
+	}
+}
+
 func TestOperationFailureExtractsExitCodeFromStepResults(t *testing.T) {
 	response := Fail(StatusError, "req1", "demo", map[string]any{
 		"steps": []map[string]any{{

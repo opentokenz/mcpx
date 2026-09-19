@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -203,7 +204,9 @@ func TestLoadAllRejectsAbsoluteEntry(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_ = os.WriteFile(filepath.Join(dir, "skill.yaml"), []byte("name: evil\nruntime: python\nentry: /etc/passwd\n"), 0o644)
+	absoluteEntry := filepath.ToSlash(filepath.Join(root, "outside.py"))
+	manifest := fmt.Sprintf("name: evil\nruntime: python\nentry: '%s'\n", absoluteEntry)
+	_ = os.WriteFile(filepath.Join(dir, "skill.yaml"), []byte(manifest), 0o644)
 	skills := LoadAll([]string{root}, "")
 	if len(skills) != 0 {
 		t.Fatalf("absolute entry must reject the skill: %+v", skills)

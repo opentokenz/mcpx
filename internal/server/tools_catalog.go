@@ -199,7 +199,7 @@ func cleanActionTool(name, description string, common map[string]any, branches m
 		for key, value := range branch.Properties {
 			properties[key] = value
 		}
-		required := append([]string{}, branch.Required...)
+		required := withoutBoundSessionRequirement(branch.Required)
 		required = append([]string{"action"}, required...)
 		oneOf = append(oneOf, map[string]any{
 			"type":                 "object",
@@ -215,31 +215,41 @@ func cleanActionTool(name, description string, common map[string]any, branches m
 	// enforced by validators that implement oneOf correctly. An open root is
 	// required for connectors that flatten or pre-validate discriminated unions.
 	raw, _ := json.Marshal(map[string]any{
-		"type": "object", "description": description, "properties": rootProperties,
+		"type": "object", "properties": rootProperties,
 		"required": []string{"action"}, "oneOf": oneOf,
 	})
 	return annotatedTool(mcp.Tool{Name: name, Description: description, InputSchema: json.RawMessage(raw)}, annotation)
 }
 
+func withoutBoundSessionRequirement(required []string) []string {
+	out := make([]string, 0, len(required))
+	for _, field := range required {
+		if field != "remote_session_id" {
+			out = append(out, field)
+		}
+	}
+	return out
+}
+
 func activityInputSchema() map[string]any {
 	properties := map[string]any{
-		"intent":     stringSchema("当前工作 turn 的目标或要解决的问题；仅在开始新的实质工作 turn 时填写，非空 intent 会开启新 turn，不要用它描述单个工具动作"),
-		"hypothesis": stringSchema("尚未被证据确认、可被后续读取或验证推翻的暂定判断；只在假设新建或发生实质变化时填写，不要把已观察事实写成 hypothesis"),
-		"evidence":   stringSchema("刚刚获得的可核验事实、代码现状、命令结果或其他直接观察；只写事实，不写由事实推导出的判断，并避免重复上一条 evidence"),
-		"conclusion": stringSchema("由已有 evidence 支持的当前稳定判断或问题结论；它是推断结果而不是原始事实，也不是下一步动作"),
-		"next":       stringSchema("基于当前理解选择的立即下一动作；应与本次正在发起的 tool call 对齐，例如“读取自动取消任务”，不要描述更远期计划"),
-		"status":     stringSchema("无法归入前五类但值得公开的当前阶段、等待或阻塞状态；仅在状态发生实质变化时填写，不作为工具 heartbeat，也不替代 progress 的业务里程碑"),
+		"intent":     stringSchema("新实质工作 turn 的目标；非空即开启新 turn"),
+		"hypothesis": stringSchema("尚未证实、可被后续证据推翻的暂定判断"),
+		"evidence":   stringSchema("本次新观察到的可核验事实；不写推断"),
+		"conclusion": stringSchema("由 evidence 支持的当前判断"),
+		"next":       stringSchema("立即下一步；应与本次调用对齐"),
+		"status":     stringSchema("仅在阶段、等待或阻塞状态发生实质变化时填写"),
 	}
 	return map[string]any{
 		"type":                 "object",
-		"description":          "可选公开 Activity。只填写本次发生实质变化的语义字段，不重复未变化内容；可一次提供多个字段。Runtime 自动生成 turn_id、sequence、state 和 related_call_id，并按 intent、hypothesis、evidence、conclusion、next、status 顺序展开非空字段",
+		"description":          "可选公开 Activity；只填写本次发生变化的字段，不重复未变化内容",
 		"properties":           properties,
 		"additionalProperties": false,
 	}
 }
 
 func withEmbeddedActivitySchema(tool mcp.Tool) mcp.Tool {
-	if !toolSupportsEmbeddedActivity(tool.Name) || tool.InputSchema == nil {
+	if tool.InputSchema == nil {
 		return tool
 	}
 	encoded, err := json.Marshal(tool.InputSchema)
@@ -250,25 +260,76 @@ func withEmbeddedActivitySchema(tool mcp.Tool) mcp.Tool {
 	if json.Unmarshal(encoded, &schema) != nil || schema == nil {
 		return tool
 	}
-	inject := func(properties map[string]any) {
-		if properties != nil {
-			properties["activity"] = activityInputSchema()
+	if toolSupportsEmbeddedActivity(tool.Name) {
+		rootProperties, _ := schema["properties"].(map[string]any)
+		if rootProperties != nil {
+			rootProperties["activity"] = activityInputSchema()
+		}
+		if branches, ok := schema["oneOf"].([]any); ok {
+			for _, raw := range branches {
+				branch, _ := raw.(map[string]any)
+				properties, _ := branch["properties"].(map[string]any)
+				if properties != nil {
+					// Root validation owns the full optional Activity contract. Keep only
+					// an object placeholder in action branches so clients that project a
+					// oneOf branch still accept Activity without repeating its six fields.
+					properties["activity"] = map[string]any{"type": "object"}
+				}
+			}
 		}
 	}
-	rootProperties, _ := schema["properties"].(map[string]any)
-	inject(rootProperties)
-	if branches, ok := schema["oneOf"].([]any); ok {
-		for _, raw := range branches {
-			branch, _ := raw.(map[string]any)
-			properties, _ := branch["properties"].(map[string]any)
-			inject(properties)
-		}
-	}
+	deduplicateBranchDescriptions(schema)
 	raw, err := json.Marshal(schema)
 	if err == nil {
 		tool.InputSchema = json.RawMessage(raw)
 	}
 	return tool
+}
+
+func deduplicateBranchDescriptions(schema map[string]any) {
+	rootProperties, _ := schema["properties"].(map[string]any)
+	branches, _ := schema["oneOf"].([]any)
+	for _, raw := range branches {
+		branch, _ := raw.(map[string]any)
+		properties, _ := branch["properties"].(map[string]any)
+		for key, branchProperty := range properties {
+			rootProperty, ok := rootProperties[key]
+			if !ok {
+				continue
+			}
+			removeMatchingDescriptions(branchProperty, rootProperty)
+		}
+	}
+}
+
+func removeMatchingDescriptions(branch, root any) {
+	switch branchValue := branch.(type) {
+	case map[string]any:
+		rootValue, ok := root.(map[string]any)
+		if !ok {
+			return
+		}
+		if branchDescription, ok := branchValue["description"].(string); ok {
+			if rootDescription, ok := rootValue["description"].(string); ok && branchDescription == rootDescription {
+				delete(branchValue, "description")
+			}
+		}
+		for key, child := range branchValue {
+			if rootChild, ok := rootValue[key]; ok {
+				removeMatchingDescriptions(child, rootChild)
+			}
+		}
+	case []any:
+		rootValue, ok := root.([]any)
+		if !ok {
+			return
+		}
+		for index, child := range branchValue {
+			if index < len(rootValue) {
+				removeMatchingDescriptions(child, rootValue[index])
+			}
+		}
+	}
 }
 
 func stringSchema(description string) map[string]any {
@@ -301,7 +362,7 @@ func enumSchema(description string, values ...string) map[string]any {
 // registerConsolidatedToolsCatalog registers the clean-core support tools.
 func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 	toolDesc := prompts.MustDescriptions()
-	remoteSession := stringSchema("持久化的 Remote Session 标识")
+	remoteSession := stringSchema("Remote Session 标识；当前 MCP transport 已绑定 Session 时省略，显式传入可覆盖绑定")
 	workspace := stringSchema("已注册的 Workspace 名称")
 	path := stringSchema("工作区相对路径")
 	supportTool := cleanCoreTool
@@ -357,18 +418,18 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 			"type":                 "object",
 			"description":          "单操作模式；支持 status、wait、result、cancel、resume。",
 			"properties":           operationBranchProperties(false),
-			"required":             []string{"remote_session_id", "action", "operation_id"},
+			"required":             []string{"action", "operation_id"},
 			"additionalProperties": false,
 		},
 		map[string]any{
 			"type":                 "object",
 			"description":          "批量查询模式；仅支持 status、result，直接传 operation_ids。",
 			"properties":           operationBranchProperties(true),
-			"required":             []string{"remote_session_id", "action", "operation_ids"},
+			"required":             []string{"action", "operation_ids"},
 			"additionalProperties": false,
 		},
 	}
-	operationManageSchema["required"] = []string{"remote_session_id", "action"}
+	operationManageSchema["required"] = []string{"action"}
 	operationManage.InputSchema = mustSchemaJSON(operationManageSchema)
 	r.addTool(s, operationManage, r.toolOperationManage)
 
@@ -388,9 +449,9 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 	executeCommon := map[string]any{
 		"remote_session_id": remoteSession, "purpose": stringSchema("本次执行的用户目标"),
 		"idempotency_key": stringSchema("同一执行请求重试时复用的幂等键"),
-		"scope":           enumSchema("执行范围", "workspace"), "yield_time_ms": numberSchema("等待时长"),
-		"user_confirmed": booleanSchema("用户已确认同一命令或 runtime+script；服务端仍会校验待确认摘要与脚本 SHA"),
-		"execution_mode": enumSchema("async 表示外层 Operation 异步调度；python/node runtime 使用 Task 生命周期，sqlite readonly query 直接返回结构化结果", "sync", "async"),
+		"yield_time_ms":   numberSchema("等待时长"),
+		"user_confirmed":  booleanSchema("用户已确认同一命令或 runtime+script；服务端仍会校验待确认摘要与脚本 SHA"),
+		"execution_mode":  enumSchema("async 表示外层 Operation 异步调度；python/node runtime 使用 Task 生命周期，sqlite readonly query 直接返回结构化结果", "sync", "async"),
 	}
 	executeBranches := map[string]actionSchemaBranch{
 		"run": {Description: "执行 argv+shell=false、command、项目 task，或一次性 runtime+script，四种模式互斥。argv 按元素直接传递；python/node 源码经 stdin+EOF 直接执行且不经过 shell，sqlite 对 Workspace 内现有数据库执行只读单查询并返回结构化行。", Properties: map[string]any{
@@ -481,6 +542,78 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 		"call":     {Description: "调用上游 MCP Tool；Runtime 负责当前 schema 与参数校验。", Required: []string{"remote_session_id", "purpose", "server", "tool"}},
 	}
 	r.addTool(s, cleanActionTool("mcp_tool", toolDesc["mcp_tool"], mcpCommon, mcpBranches, mcpToolAnnotation), r.toolMCPTool)
+
+	browserTabID := stringSchema("Browser Service 返回的标签页 ID；用户现有标签页先用 tabs 获取，操作前通常先 claim")
+	browserTimeout := map[string]any{"type": "integer", "minimum": 0, "maximum": 60000, "description": "浏览器动作超时（毫秒）；click/double_click 仅 node_id 模式支持"}
+	browserKeys := arraySchema(stringSchema("按键名，如 Control、Shift、Enter、A"), "同时按下或发送的按键序列")
+	browserKeys["minItems"] = 1
+	browserPath := arraySchema(map[string]any{
+		"type": "object", "additionalProperties": false,
+		"properties": map[string]any{"x": map[string]any{"type": "number"}, "y": map[string]any{"type": "number"}},
+		"required":   []string{"x", "y"},
+	}, "拖拽路径坐标")
+	browserPath["minItems"] = 1
+	browserOfficialCommand := map[string]any{
+		"type": "object", "additionalProperties": true,
+		"description": "官方 Browser Service handleRpc(execute) 命令对象；用于当前强类型动作未覆盖的官方 Playwright/AX/WebMCP/history/export/dialog 等能力。仍经过 Browser Service 的 origin/site-status/confirmation 等安全检查；不得设置 browser_id，list_browsers 请使用 status。",
+		"properties":  map[string]any{"type": stringSchema("官方 Browser Service execute command type")},
+		"required":    []string{"type"},
+	}
+	browserCommon := map[string]any{
+		"remote_session_id":   remoteSession,
+		"browser_instance_id": stringSchema("OpenAI 官方扩展实例 ID；多个浏览器实例并存时，除 status/tabs 外必须明确指定"),
+		"purpose":             stringSchema("浏览器操作的真实用户目标和预期副作用；status/tabs 可省略"),
+		"user_confirmed":      booleanSchema("仅在上一响应明确要求 Browser Service 权限确认且用户已确认后设为 true；服务端仍校验同一动作与官方权限提示"),
+	}
+	browserBranches := map[string]actionSchemaBranch{
+		"status":     {Description: "发现并验证本机 OpenAI 官方 ChatGPT/Codex 浏览器扩展连接。", Required: []string{"remote_session_id"}},
+		"tabs":       {Description: "读取官方扩展可见的当前用户浏览器标签页元数据；复用现有浏览器与登录态。", Required: []string{"remote_session_id"}},
+		"claim":      {Description: "把用户现有标签页纳入当前 Browser Service 会话；不改变页面内容。", Properties: map[string]any{"tab_id": browserTabID}, Required: []string{"remote_session_id", "purpose", "tab_id"}},
+		"agent_tabs": {Description: "列出当前 Browser Service 会话已创建或已 claim 的标签页。", Required: []string{"remote_session_id", "purpose"}},
+		"get_tab":    {Description: "读取会话内单个标签页当前 title/url。", Properties: map[string]any{"tab_id": browserTabID}, Required: []string{"remote_session_id", "purpose", "tab_id"}},
+		"create_tab": {Description: "通过官方扩展创建一个新的受控标签页。", Required: []string{"remote_session_id", "purpose"}},
+		"close_tab":  {Description: "关闭指定受控标签页。", Properties: map[string]any{"tab_id": browserTabID}, Required: []string{"remote_session_id", "purpose", "tab_id"}},
+		"navigate": {Description: "通过官方 Browser Service 导航到完整 http/https URL；保留其 URL、站点状态和 origin 权限检查。", Properties: map[string]any{
+			"tab_id": browserTabID, "url": stringSchema("完整 http:// 或 https:// URL"), "timeout_ms": browserTimeout,
+		}, Required: []string{"remote_session_id", "purpose", "tab_id", "url"}},
+		"back":    {Description: "后退当前标签页历史记录。", Properties: map[string]any{"tab_id": browserTabID, "timeout_ms": browserTimeout}, Required: []string{"remote_session_id", "purpose", "tab_id"}},
+		"forward": {Description: "前进当前标签页历史记录。", Properties: map[string]any{"tab_id": browserTabID, "timeout_ms": browserTimeout}, Required: []string{"remote_session_id", "purpose", "tab_id"}},
+		"reload":  {Description: "重新加载当前标签页。", Properties: map[string]any{"tab_id": browserTabID, "timeout_ms": browserTimeout}, Required: []string{"remote_session_id", "purpose", "tab_id"}},
+		"snapshot": {Description: "读取官方 DOM-CUA 可见页面结构并返回稳定 node_id；后续 click/scroll 可直接使用 node_id。", Properties: map[string]any{
+			"tab_id": browserTabID,
+		}, Required: []string{"remote_session_id", "purpose", "tab_id"}},
+		"click": {Description: "点击 DOM-CUA node_id；没有 node_id 时可使用页面坐标 x/y。timeout_ms 仅 node_id 模式生效。", Properties: map[string]any{
+			"tab_id": browserTabID, "node_id": stringSchema("最近一次 snapshot 返回的 DOM-CUA node_id"), "x": map[string]any{"type": "number"}, "y": map[string]any{"type": "number"},
+			"button": map[string]any{"type": "integer", "enum": []int{1, 2, 3}, "description": "鼠标按钮：1 左键、2 中键、3 右键"}, "keys": browserKeys, "timeout_ms": browserTimeout,
+		}, Required: []string{"remote_session_id", "purpose", "tab_id"}},
+		"double_click": {Description: "双击 DOM-CUA node_id；没有 node_id 时可使用页面坐标 x/y。timeout_ms 仅 node_id 模式生效。", Properties: map[string]any{
+			"tab_id": browserTabID, "node_id": stringSchema("最近一次 snapshot 返回的 DOM-CUA node_id"), "x": map[string]any{"type": "number"}, "y": map[string]any{"type": "number"}, "keys": browserKeys, "timeout_ms": browserTimeout,
+		}, Required: []string{"remote_session_id", "purpose", "tab_id"}},
+		"type": {Description: "向当前聚焦输入目标键入文本；由官方 Browser Service 处理剪贴板/富文本与输入防护。", Properties: map[string]any{
+			"tab_id": browserTabID, "text": stringSchema("要输入的文本"),
+		}, Required: []string{"remote_session_id", "purpose", "tab_id", "text"}},
+		"keypress": {Description: "向当前聚焦目标发送按键或组合键。", Properties: map[string]any{
+			"tab_id": browserTabID, "keys": browserKeys,
+		}, Required: []string{"remote_session_id", "purpose", "tab_id", "keys"}},
+		"scroll": {Description: "滚动指定 DOM 节点或页面中心；提供 x/y 时改为坐标滚动。", Properties: map[string]any{
+			"tab_id": browserTabID, "node_id": stringSchema("可选 DOM-CUA node_id"), "x": map[string]any{"type": "number"}, "y": map[string]any{"type": "number"},
+			"scroll_x": map[string]any{"type": "number", "description": "水平滚动量"}, "scroll_y": map[string]any{"type": "number", "description": "垂直滚动量"}, "keys": browserKeys,
+		}, Required: []string{"remote_session_id", "purpose", "tab_id", "scroll_x", "scroll_y"}},
+		"move": {Description: "移动鼠标到页面坐标。", Properties: map[string]any{
+			"tab_id": browserTabID, "x": map[string]any{"type": "number"}, "y": map[string]any{"type": "number"}, "keys": browserKeys,
+		}, Required: []string{"remote_session_id", "purpose", "tab_id", "x", "y"}},
+		"drag": {Description: "沿给定页面坐标路径拖拽。", Properties: map[string]any{
+			"tab_id": browserTabID, "path": browserPath, "keys": browserKeys,
+		}, Required: []string{"remote_session_id", "purpose", "tab_id", "path"}},
+		"screenshot": {Description: "通过官方 Browser Service 截取当前页面视口、整页或裁剪区域，返回 base64 图像数据。", Properties: map[string]any{
+			"tab_id": browserTabID, "full_page": booleanSchema("是否截取整页"),
+			"crop_x": map[string]any{"type": "number"}, "crop_y": map[string]any{"type": "number"}, "crop_width": map[string]any{"type": "number", "exclusiveMinimum": 0}, "crop_height": map[string]any{"type": "number", "exclusiveMinimum": 0},
+		}, Required: []string{"remote_session_id", "purpose", "tab_id"}},
+		"official": {Description: "高级入口：把一个官方 Browser Service execute command 交给同一 Browser Service 安全策略层执行。仅在强类型动作无法表达官方能力时使用；不会直接调用 extension-host/raw CDP。", Properties: map[string]any{
+			"command": browserOfficialCommand,
+		}, Required: []string{"remote_session_id", "purpose", "command"}},
+	}
+	r.addTool(s, cleanActionTool("browser", toolDesc["browser"], browserCommon, browserBranches, browserToolAnnotation), r.toolBrowser)
 
 	r.addTool(s, supportTool("screenshot_capture", toolDesc["screenshot_capture"], map[string]any{
 		"remote_session_id": remoteSession, "purpose": stringSchema("截取屏幕的用户目标和范围"),

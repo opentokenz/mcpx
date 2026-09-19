@@ -84,9 +84,9 @@ for line in sys.stdin:
 		t.Fatal(err)
 	}
 	if err := config.WriteMCPFile(config.ProjectMCPPath(workspace.Path), config.MCPFile{MCPServers: map[string]config.MCPServer{
-		"fake": {Description: "Passthrough contract server", Command: "python3", Args: []string{script}, Env: map[string]string{
+		"fake": testMCPServer(t, "Passthrough contract server", script, map[string]string{
 			"MCPX_TEST_CALL_LOG": callLog, "MCPX_TEST_START_LOG": startLog,
-		}},
+		}),
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ for line in sys.stdin:
 		t.Fatal(err)
 	}
 	if err := config.WriteMCPFile(config.ProjectMCPPath(workspace.Path), config.MCPFile{MCPServers: map[string]config.MCPServer{
-		"failing": {Description: "Failure contract server", Command: "python3", Args: []string{script}, Env: map[string]string{"MCPX_TEST_START_LOG": startLog}},
+		"failing": testMCPServer(t, "Failure contract server", script, map[string]string{"MCPX_TEST_START_LOG": startLog}),
 	}}); err != nil {
 		t.Fatal(err)
 	}

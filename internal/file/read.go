@@ -39,11 +39,12 @@ func (e *SizeLimitError) Error() string {
 
 // ReadOptions controls file.read.
 type ReadOptions struct {
-	WorkspaceRoot string
-	Path          string // relative
-	Offset        int    // 0-based line start
-	Limit         int    // max lines; 0 => default
-	MaxBytes      int64
+	WorkspaceRoot  string
+	Path           string // relative
+	Offset         int    // 0-based line start
+	LineByteOffset int    // UTF-8 byte offset within Offset line
+	Limit          int    // max lines; 0 => default
+	MaxBytes       int64
 }
 
 // LineEndingCounts records line terminators in the original bytes.
@@ -65,15 +66,16 @@ type Format struct {
 
 // ReadResult is file.read data.
 type ReadResult struct {
-	Path       string `json:"path"`
-	Content    string `json:"content"`
-	TotalLines int    `json:"total_lines"`
-	Offset     int    `json:"offset"`
-	Limit      int    `json:"limit"`
-	Truncated  bool   `json:"truncated"`
-	LineEnding string `json:"line_ending,omitempty"`
-	Format     Format `json:"format"`
-	SHA256     string `json:"-"`
+	Path           string `json:"path"`
+	Content        string `json:"content"`
+	TotalLines     int    `json:"total_lines"`
+	Offset         int    `json:"offset"`
+	LineByteOffset int    `json:"line_byte_offset,omitempty"`
+	Limit          int    `json:"limit"`
+	Truncated      bool   `json:"truncated"`
+	LineEnding     string `json:"line_ending,omitempty"`
+	Format         Format `json:"format"`
+	SHA256         string `json:"-"`
 }
 
 // FullReadOptions controls an explicit whole-file read. Unlike ReadOptions,
@@ -108,6 +110,9 @@ func Read(opts ReadOptions) (ReadResult, error) {
 	}
 	if opts.Offset < 0 {
 		opts.Offset = 0
+	}
+	if opts.LineByteOffset < 0 {
+		opts.LineByteOffset = 0
 	}
 	if _, err := Resolve(opts.WorkspaceRoot, opts.Path); err != nil {
 		return ReadResult{}, err
@@ -186,27 +191,33 @@ func Read(opts ReadOptions) (ReadResult, error) {
 	if start > lineNumber {
 		start = lineNumber
 	}
+	if err := applyLineByteOffset(selected, opts.LineByteOffset); err != nil {
+		return ReadResult{}, err
+	}
 	chunk := strings.Join(selected, "\n")
 	if len(selected) > 0 && (endsWithNewline || start+len(selected) < lineNumber) {
 		chunk += "\n"
 	}
 	truncated := start+len(selected) < lineNumber
-	if int64(len(chunk)) > opts.MaxBytes {
-		chunk = truncateUTF8(chunk, int(opts.MaxBytes))
-		truncated = true
+	budgetedChunk, byteTruncated, budgetErr := applyReadByteBudget(chunk, opts.MaxBytes)
+	if budgetErr != nil {
+		return ReadResult{}, budgetErr
 	}
+	chunk = budgetedChunk
+	truncated = truncated || byteTruncated
 	digest := hasher.Sum(nil)
 	format := formatFromReadStats(prefix[:prefixSize], crlfCount, lfCount, crCount, endsWithNewline)
 	return ReadResult{
-		Path:       opts.Path,
-		Content:    chunk,
-		TotalLines: lineNumber,
-		Offset:     start,
-		Limit:      opts.Limit,
-		Truncated:  truncated,
-		LineEnding: format.LineEnding,
-		Format:     format,
-		SHA256:     "sha256:" + hex.EncodeToString(digest),
+		Path:           opts.Path,
+		Content:        chunk,
+		TotalLines:     lineNumber,
+		Offset:         start,
+		LineByteOffset: opts.LineByteOffset,
+		Limit:          opts.Limit,
+		Truncated:      truncated,
+		LineEnding:     format.LineEnding,
+		Format:         format,
+		SHA256:         "sha256:" + hex.EncodeToString(digest),
 	}, nil
 }
 
@@ -367,22 +378,63 @@ func readUTF16Window(handle *os.File, opts ReadOptions, size int64) (ReadResult,
 	if start < 0 {
 		start = 0
 	}
-	selected := make([]string, 0, opts.Limit)
-	var line strings.Builder
+	var chunk strings.Builder
 	lineNumber := 0
+	selectedLines := 0
+	lineUTF8Bytes := 0
+	lineHasContent := false
 	lineEnded := false
 	pendingCR := false
+	byteTruncated := false
+	sawStartLine := false
 	crlfCount, lfCount, crCount := 0, 0, 0
 	finalNewline := false
-	emit := func(ending string) {
-		if lineNumber >= start && lineNumber < start+opts.Limit {
-			value := line.String()
-			if int64(len(value)) > opts.MaxBytes {
-				value = truncateUTF8(value, int(opts.MaxBytes))
-			}
-			selected = append(selected, value)
+
+	appendChunkRune := func(r rune) error {
+		if byteTruncated {
+			return nil
 		}
-		line.Reset()
+		runeBytes := utf8.RuneLen(r)
+		if int64(chunk.Len()+runeBytes) > opts.MaxBytes {
+			if chunk.Len() == 0 {
+				return fmt.Errorf("read byte budget %d cannot fit the next UTF-8 code point", opts.MaxBytes)
+			}
+			byteTruncated = true
+			return nil
+		}
+		chunk.WriteRune(r)
+		return nil
+	}
+	appendChunkNewline := func() {
+		if byteTruncated {
+			return
+		}
+		if int64(chunk.Len()+1) > opts.MaxBytes {
+			byteTruncated = true
+			return
+		}
+		chunk.WriteByte('\n')
+	}
+	validateLineByteOffset := func() error {
+		if lineNumber != start {
+			return nil
+		}
+		sawStartLine = true
+		if opts.LineByteOffset > lineUTF8Bytes {
+			return fmt.Errorf("line_byte_offset %d exceeds line length %d", opts.LineByteOffset, lineUTF8Bytes)
+		}
+		return nil
+	}
+	emit := func(ending string) error {
+		if err := validateLineByteOffset(); err != nil {
+			return err
+		}
+		if lineNumber >= start && lineNumber < start+opts.Limit {
+			selectedLines++
+			appendChunkNewline()
+		}
+		lineUTF8Bytes = 0
+		lineHasContent = false
 		lineNumber++
 		lineEnded = true
 		finalNewline = true
@@ -394,12 +446,23 @@ func readUTF16Window(handle *os.File, opts ReadOptions, size int64) (ReadResult,
 		default:
 			lfCount++
 		}
+		return nil
 	}
-	appendRune := func(r rune) {
-		if lineNumber < start || lineNumber >= start+opts.Limit || int64(line.Len()) >= opts.MaxBytes {
-			return
+	appendRune := func(r rune) error {
+		lineHasContent = true
+		before := lineUTF8Bytes
+		runeBytes := utf8.RuneLen(r)
+		lineUTF8Bytes += runeBytes
+		if lineNumber < start || lineNumber >= start+opts.Limit {
+			return nil
 		}
-		line.WriteRune(r)
+		if lineNumber == start && opts.LineByteOffset > before {
+			if opts.LineByteOffset < lineUTF8Bytes {
+				return fmt.Errorf("line_byte_offset %d is not on a UTF-8 boundary", opts.LineByteOffset)
+			}
+			return nil
+		}
+		return appendChunkRune(r)
 	}
 	for {
 		var raw [2]byte
@@ -431,34 +494,43 @@ func readUTF16Window(handle *os.File, opts ReadOptions, size int64) (ReadResult,
 		}
 		if pendingCR {
 			if runeValue == '\n' {
-				emit("CRLF")
+				if err := emit("CRLF"); err != nil {
+					return ReadResult{}, err
+				}
 				pendingCR = false
 				continue
 			}
-			emit("CR")
+			if err := emit("CR"); err != nil {
+				return ReadResult{}, err
+			}
 			pendingCR = false
 		}
 		switch runeValue {
 		case '\r':
 			pendingCR = true
 		case '\n':
-			emit("LF")
+			if err := emit("LF"); err != nil {
+				return ReadResult{}, err
+			}
 		default:
 			lineEnded = false
 			finalNewline = false
-			appendRune(runeValue)
+			if err := appendRune(runeValue); err != nil {
+				return ReadResult{}, err
+			}
 		}
 	}
 	if pendingCR {
-		emit("CR")
+		if err := emit("CR"); err != nil {
+			return ReadResult{}, err
+		}
 	} else if !lineEnded {
-		if line.Len() > 0 || lineNumber == 0 {
+		if lineHasContent || lineNumber == 0 {
+			if err := validateLineByteOffset(); err != nil {
+				return ReadResult{}, err
+			}
 			if lineNumber >= start && lineNumber < start+opts.Limit {
-				value := line.String()
-				if int64(len(value)) > opts.MaxBytes {
-					value = truncateUTF8(value, int(opts.MaxBytes))
-				}
-				selected = append(selected, value)
+				selectedLines++
 			}
 			lineNumber++
 		}
@@ -466,21 +538,16 @@ func readUTF16Window(handle *os.File, opts ReadOptions, size int64) (ReadResult,
 	if lineNumber == 0 && size == 2 {
 		lineNumber = 0
 	}
-	chunk := strings.Join(selected, "\n")
-	if len(selected) > 0 && (finalNewline || start+len(selected) < lineNumber) {
-		chunk += "\n"
+	if opts.LineByteOffset > 0 && !sawStartLine {
+		return ReadResult{}, fmt.Errorf("line_byte_offset %d requires an existing offset line", opts.LineByteOffset)
 	}
-	truncated := start+len(selected) < lineNumber
-	if int64(len(chunk)) > opts.MaxBytes {
-		chunk = truncateUTF8(chunk, int(opts.MaxBytes))
-		truncated = true
-	}
+	truncated := start+selectedLines < lineNumber || byteTruncated
 	format.LineEnding = lineEndingName(crlfCount, lfCount, crCount)
 	format.LineEndingCounts = LineEndingCounts{LF: lfCount, CRLF: crlfCount, CR: crCount}
 	format.FinalNewline = boolPointer(finalNewline)
 	digest := hasher.Sum(nil)
 	return ReadResult{
-		Path: opts.Path, Content: chunk, TotalLines: lineNumber, Offset: minInt(start, lineNumber), Limit: opts.Limit,
+		Path: opts.Path, Content: chunk.String(), TotalLines: lineNumber, Offset: minInt(start, lineNumber), LineByteOffset: opts.LineByteOffset, Limit: opts.Limit,
 		Truncated: truncated, LineEnding: format.LineEnding, Format: format,
 		SHA256: "sha256:" + hex.EncodeToString(digest),
 	}, nil
@@ -614,6 +681,35 @@ func normalizeMIME(detected string) string {
 		detected = detected[:separator]
 	}
 	return strings.TrimSpace(detected)
+}
+
+func applyLineByteOffset(lines []string, offset int) error {
+	if offset <= 0 {
+		return nil
+	}
+	if len(lines) == 0 {
+		return fmt.Errorf("line_byte_offset %d requires an existing offset line", offset)
+	}
+	value := lines[0]
+	if offset > len(value) {
+		return fmt.Errorf("line_byte_offset %d exceeds line length %d", offset, len(value))
+	}
+	if offset < len(value) && !utf8.RuneStart(value[offset]) {
+		return fmt.Errorf("line_byte_offset %d is not on a UTF-8 boundary", offset)
+	}
+	lines[0] = value[offset:]
+	return nil
+}
+
+func applyReadByteBudget(value string, maxBytes int64) (string, bool, error) {
+	if maxBytes <= 0 || int64(len(value)) <= maxBytes {
+		return value, false, nil
+	}
+	truncated := truncateUTF8(value, int(maxBytes))
+	if truncated == "" && value != "" {
+		return "", false, fmt.Errorf("read byte budget %d cannot fit the next UTF-8 code point", maxBytes)
+	}
+	return truncated, true, nil
 }
 
 func truncateUTF8(value string, maxBytes int) string {

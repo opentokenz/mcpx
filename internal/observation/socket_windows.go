@@ -87,10 +87,9 @@ func (l *namedPipeListener) Close() error {
 	}
 	l.closed = true
 	handle := l.handle
-	l.handle = 0
 	l.mu.Unlock()
 	if handle != 0 {
-		_ = windows.CloseHandle(handle)
+		wakeObserverPipe(l.path)
 	}
 	return nil
 }
@@ -153,7 +152,7 @@ func dialObserverSocket(ctx context.Context, path string) (net.Conn, error) {
 			}
 			return &namedPipeConn{file: file, addr: namedPipeAddr(path)}, nil
 		}
-		if !errors.Is(err, windows.ERROR_PIPE_BUSY) {
+		if !errors.Is(err, windows.ERROR_PIPE_BUSY) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
 			return nil, err
 		}
 		timer := time.NewTimer(namedPipeRetryDelay)
@@ -167,6 +166,25 @@ func dialObserverSocket(ctx context.Context, path string) (net.Conn, error) {
 }
 
 func removeObserverSocket(string) error { return nil }
+
+func wakeObserverPipe(path string) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		0,
+		nil,
+		windows.OPEN_EXISTING,
+		0,
+		0,
+	)
+	if err == nil {
+		_ = windows.CloseHandle(handle)
+	}
+}
 
 type namedPipeConn struct {
 	file *os.File

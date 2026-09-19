@@ -21,6 +21,7 @@ import (
 	"mcpx/internal/artifact"
 	"mcpx/internal/audit"
 	"mcpx/internal/auth"
+	"mcpx/internal/browseruse"
 	"mcpx/internal/config"
 	"mcpx/internal/deletion"
 	"mcpx/internal/envelope"
@@ -53,33 +54,36 @@ type Options struct {
 
 // Runtime is the MCPX process root.
 type Runtime struct {
-	opts            Options
-	cfg             config.Config
-	reg             *workspace.Registry
-	approvals       *approval.Store
-	audit           *audit.Logger
-	globalCfgPath   string
-	tasks           *terminal.TaskManager
-	secrets         *secrets.Store
-	oauth           *oauth.Server
-	state           *state.Store
-	remote          *remotesession.Service
-	environment     *environment.Service
-	workspaceDiff   *workspacechanges.Service
-	fileSnapshots   *filesnapshot.Store
-	artifacts       *artifact.Service
-	plans           *plan.Service
-	deletions       *deletion.Store
-	retention       *state.RetentionService
-	retentionCancel context.CancelFunc
-	retentionDone   chan struct{}
-	screenshot      screenCapturer
-	observation     *observationBridge
-	operations      *operation.Service
-	observerSocket  *observation.SocketServer
-	activityMu      sync.Mutex
-	closeOnce       sync.Once
-	closeErr        error
+	opts             Options
+	cfg              config.Config
+	reg              *workspace.Registry
+	approvals        *approval.Store
+	audit            *audit.Logger
+	globalCfgPath    string
+	tasks            *terminal.TaskManager
+	secrets          *secrets.Store
+	oauth            *oauth.Server
+	state            *state.Store
+	remote           *remotesession.Service
+	environment      *environment.Service
+	workspaceDiff    *workspacechanges.Service
+	fileSnapshots    *filesnapshot.Store
+	artifacts        *artifact.Service
+	plans            *plan.Service
+	deletions        *deletion.Store
+	retention        *state.RetentionService
+	retentionCancel  context.CancelFunc
+	retentionDone    chan struct{}
+	screenshot       screenCapturer
+	browserService   *browseruse.Service
+	observation      *observationBridge
+	operations       *operation.Service
+	observerSocket   *observation.SocketServer
+	activityMu       sync.Mutex
+	sessionBindingMu sync.RWMutex
+	sessionBindings  map[string]string
+	closeOnce        sync.Once
+	closeErr         error
 
 	// For schema revision and capability catalog.
 	toolIndex    map[string]mcp.Tool
@@ -249,6 +253,7 @@ func New(opts Options) (*Runtime, error) {
 		deletions:      deletion.NewStore(stateStore.DB()),
 		retention:      retentionService,
 		screenshot:     screenshot.NewService(),
+		browserService: browseruse.NewService(),
 		toolIndex:      map[string]mcp.Tool{},
 		toolHandlers:   map[string]mcp.ToolHandler{},
 		toolMeta:       map[string]toolAnnotation{},
@@ -478,8 +483,13 @@ func (r *Runtime) Close() error {
 		if r.tasks != nil {
 			r.tasks.Close()
 		}
+		if r.browserService != nil {
+			if err := r.browserService.Close(); err != nil && r.closeErr == nil {
+				r.closeErr = err
+			}
+		}
 		if r.state != nil {
-			if err := r.state.Close(); r.closeErr == nil {
+			if err := r.state.Close(); err != nil && r.closeErr == nil {
 				r.closeErr = err
 			}
 		}

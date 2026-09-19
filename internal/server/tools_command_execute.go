@@ -20,6 +20,7 @@ import (
 	"mcpx/internal/envelope"
 	workspacefile "mcpx/internal/file"
 	"mcpx/internal/projecttask"
+	"mcpx/internal/pythonruntime"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/security"
 	"mcpx/internal/sqlitequery"
@@ -355,7 +356,6 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 	data["next_action"] = nextAction(nextTool, map[string]any{
 		"remote_session_id": remote.ID, "action": "attach", "execution_task_id": task.ID,
 		"stdout_offset": data["stdout_next_offset"], "stderr_offset": data["stderr_next_offset"],
-		"yield_time_ms": int(yield / time.Millisecond),
 	})
 	data["summary"] = fmt.Sprintf("Command is running as Task %s.", task.ID)
 	detail := commandExecutionDetail(purpose, scope, commandDigest, analysis)
@@ -540,7 +540,13 @@ func ephemeralRuntimeSpecFromPayload(payload map[string]any) (*ephemeralRuntimeS
 		if database != "" {
 			return nil, fmt.Errorf("database is supported only by sqlite runtime")
 		}
-		spec.Executable, spec.Args, spec.Command = "python3", []string{"-"}, "python3 -"
+		python, resolveErr := pythonruntime.Resolve()
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		spec.Executable = python.Executable
+		spec.Args = python.Args("-")
+		spec.Command = python.Command("-")
 	case "node":
 		if database != "" {
 			return nil, fmt.Errorf("database is supported only by sqlite runtime")
@@ -900,7 +906,7 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 			if isCleanCoreRequest(ctx) {
 				nextTool = "execute"
 			}
-			data["next_action"] = nextAction(nextTool, map[string]any{"remote_session_id": remote.ID, "action": "attach", "execution_task_id": task.ID, "stdout_offset": stdoutNext, "stderr_offset": stderrNext, "yield_time_ms": int(commandYield(envReq.Payload) / time.Millisecond)})
+			data["next_action"] = nextAction(nextTool, map[string]any{"remote_session_id": remote.ID, "action": "attach", "execution_task_id": task.ID, "stdout_offset": stdoutNext, "stderr_offset": stderrNext})
 		}
 		if code, message := annotateExecutionOutcome(data); code != "" {
 			response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, data, code, message)

@@ -17,6 +17,7 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
+	"mcpx/internal/browseruse"
 	"mcpx/internal/config"
 )
 
@@ -65,6 +66,8 @@ func (a *api) handlePutCloudflareConfig(w http.ResponseWriter, r *http.Request) 
 	if body.LastPublicURL == "" {
 		body.LastPublicURL = old.LastPublicURL
 	}
+	// DesiredRunning 是后台运行意图，不暴露给前端表单，保存 UI 配置时必须保留。
+	body.DesiredRunning = old.DesiredRunning
 	saved, err := saveCloudflareDesktopConfig(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -175,6 +178,8 @@ func newAPI() *api {
 
 	a.mux.HandleFunc("GET /status", a.handleStatus)
 	a.mux.HandleFunc("POST /service/{action}", a.handleServiceAction)
+	a.mux.HandleFunc("GET /browser/status", a.handleBrowserStatus)
+	a.mux.HandleFunc("POST /browser/help", a.handleBrowserHelp)
 
 	a.mux.HandleFunc("GET /workspaces", a.handleListWorkspaces)
 	a.mux.HandleFunc("POST /workspaces", a.handleAddWorkspace)
@@ -224,6 +229,66 @@ func (a *api) application() *application.App {
 
 func (a *api) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, currentState())
+}
+
+func (a *api) handleBrowserStatus(w http.ResponseWriter, r *http.Request) {
+	discovery, err := browseruse.InspectOfficial(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	installations := make([]map[string]any, 0, len(discovery.Installations))
+	for _, installation := range discovery.Installations {
+		installations = append(installations, map[string]any{
+			"family":       installation.Family,
+			"profile":      installation.Profile,
+			"extension_id": installation.ExtensionID,
+			"name":         installation.Name,
+			"version":      installation.Version,
+		})
+	}
+	browsers := make([]map[string]any, 0, len(discovery.Backends))
+	for _, backend := range discovery.Backends {
+		browsers = append(browsers, map[string]any{
+			"family":       backend.Info.Family,
+			"name":         backend.Info.Name,
+			"version":      backend.Info.Version,
+			"extension_id": backend.Info.Metadata.ExtensionID,
+			"instance_id":  backend.Info.Metadata.ExtensionInstanceID,
+		})
+	}
+	state := discovery.State()
+	message := "未检测到 ChatGPT 官方浏览器扩展。安装并启用扩展后，MCPX 会自动识别，无需配置扩展 ID。"
+	if state == "installed_disconnected" {
+		message = "已检测到 ChatGPT 官方浏览器扩展，但 Browser Use 尚未连接。请确认浏览器已启动且扩展已启用。"
+	} else if state == "connected" {
+		message = fmt.Sprintf("ChatGPT 官方浏览器扩展已连接（%d 个浏览器实例）。", len(discovery.Backends))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"state":              state,
+		"installed":          len(discovery.Installations) > 0,
+		"connected":          len(discovery.Backends) > 0,
+		"installation_count": len(installations),
+		"browser_count":      len(browsers),
+		"pipe_count":         discovery.PipeCount,
+		"installations":      installations,
+		"browsers":           browsers,
+		"help_url":           browseruse.OfficialBrowserHelpURL,
+		"message":            message,
+	})
+}
+
+func (a *api) handleBrowserHelp(w http.ResponseWriter, r *http.Request) {
+	app := a.application()
+	if app == nil || app.Browser == nil {
+		writeError(w, http.StatusInternalServerError, "桌面应用尚未就绪")
+		return
+	}
+	if err := app.Browser.OpenURL(browseruse.OfficialBrowserHelpURL); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (a *api) handleServiceAction(w http.ResponseWriter, r *http.Request) {

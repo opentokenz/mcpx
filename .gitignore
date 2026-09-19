@@ -11,3 +11,6 @@ internal/desktop/frontend/node_modules/
 
 # local product docs (not in repo)
 .superpowers
+
+# local workspace MCP client config
+.mcp.json

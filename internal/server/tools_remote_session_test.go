@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -145,6 +146,120 @@ func TestSessionResumeIncludesPendingConfirmations(t *testing.T) {
 	if item["command"] != "echo pending" || item["purpose"] != "inspect pending" || item["user_confirmed_required"] != true {
 		t.Fatalf("pending confirmation item=%+v", item)
 	}
+}
+
+func TestRemoteSessionResumeUsesCompactPayload(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{
+		"action": "open", "workspace": "demo", "label": "compact-resume",
+	})
+	openData, _ := opened["data"].(map[string]any)
+	remoteID, _ := openData["remote_session_id"].(string)
+	if remoteID == "" {
+		t.Fatalf("session open missing remote_session_id: %+v", opened)
+	}
+	for _, field := range []string{"agent_guidance", "client_protocol", "tools", "instructions", "schema_source", "capability_version", "capability_groups", "recommended_workflows"} {
+		if openData[field] == nil {
+			t.Fatalf("new session bootstrap missing %s: %+v", field, openData)
+		}
+	}
+
+	resumed := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{
+		"action": "open", "remote_session_id": remoteID,
+	})
+	resumeData, _ := resumed["data"].(map[string]any)
+	if resumeData == nil {
+		t.Fatalf("session resume missing data: %+v", resumed)
+	}
+	if resumeData["revisions"] == nil || resumeData["remote_session"] == nil || resumeData["workspace"] == nil {
+		t.Fatalf("session resume missing dynamic identity/revision state: %+v", resumeData)
+	}
+	if resumeData["tasks_scope"] != "running" {
+		t.Fatalf("session resume must declare running-only task scope: %+v", resumeData)
+	}
+	for _, field := range []string{"agent_guidance", "client_protocol", "tools", "instructions", "schema_source", "capability_version", "capability_groups", "recommended_workflows", "mcpx", "extension_inventory", "project", "project_tasks", "git", "opened_at", "artifacts"} {
+		if resumeData[field] != nil {
+			t.Fatalf("session resume must not repeat nonessential bootstrap field %s: %+v", field, resumeData[field])
+		}
+	}
+	openJSON, err := json.Marshal(openData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeJSON, err := json.Marshal(resumeData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resumeJSON) >= len(openJSON) {
+		t.Fatalf("compact resume did not reduce serialized bytes: open=%d resume=%d", len(openJSON), len(resumeJSON))
+	}
+	t.Logf("session_resume_serialized_bytes open=%d resume=%d delta=%d", len(openJSON), len(resumeJSON), len(openJSON)-len(resumeJSON))
+
+	resumedWithInstructions := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{
+		"action": "open", "remote_session_id": remoteID, "include_instructions_content": true,
+	})
+	withInstructionsData, _ := resumedWithInstructions["data"].(map[string]any)
+	instructions, _ := withInstructionsData["instructions"].(map[string]any)
+	if instructions == nil || instructions["inline"] != true {
+		t.Fatalf("explicit instruction content request must be honored on resume: %+v", withInstructionsData)
+	}
+
+	resumedWithProjectTasks := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{
+		"action": "open", "remote_session_id": remoteID, "include_project_tasks": true,
+	})
+	withProjectData, _ := resumedWithProjectTasks["data"].(map[string]any)
+	if withProjectData["project"] == nil {
+		t.Fatalf("explicit project task request must include project summary: %+v", withProjectData)
+	}
+	if _, ok := withProjectData["project_tasks"]; !ok {
+		t.Fatalf("explicit project task request must include project_tasks field: %+v", withProjectData)
+	}
+}
+
+func TestRemoteSessionResumeIncludesOnlyRunningTasks(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID, _ := opened["remote_session_id"].(string)
+	if remoteID == "" {
+		t.Fatalf("session open missing remote_session_id: %+v", opened)
+	}
+
+	completed := callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
+		"action": "run", "remote_session_id": remoteID, "purpose": "create completed task fixture",
+		"command": testPrintCommand("completed-resume-fixture"), "yield_time_ms": 5000,
+	})
+	completedData, _ := completed["data"].(map[string]any)
+	if completedData["completed_in_call"] != true {
+		t.Fatalf("completed fixture did not finish inline: %+v", completed)
+	}
+
+	running := callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
+		"action": "run", "remote_session_id": remoteID, "purpose": "create running task fixture",
+		"command": testSleepCommand(2 * time.Second), "yield_time_ms": 1,
+	})
+	runningData, _ := running["data"].(map[string]any)
+	runningID, _ := runningData["execution_task_id"].(string)
+	if runningID == "" {
+		t.Fatalf("running fixture missing execution_task_id: %+v", running)
+	}
+
+	resumed := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "remote_session_id": remoteID})
+	resumeData, _ := resumed["data"].(map[string]any)
+	tasks, _ := resumeData["tasks"].([]any)
+	if resumeData["tasks_scope"] != "running" || len(tasks) != 1 {
+		t.Fatalf("resume must return only running tasks: %+v", resumeData)
+	}
+	task, _ := tasks[0].(map[string]any)
+	if task["execution_task_id"] != runningID || task["status"] != "running" {
+		t.Fatalf("resume running task=%+v, want %s", task, runningID)
+	}
+	if resumeData["artifacts"] != nil {
+		t.Fatalf("resume must not inject artifact history: %+v", resumeData["artifacts"])
+	}
+
+	_ = callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
+		"action": "stop", "remote_session_id": remoteID, "purpose": "stop running task fixture", "execution_task_id": runningID,
+	})
 }
 
 func TestRemoteSessionNotFoundExplainsExactCopy(t *testing.T) {

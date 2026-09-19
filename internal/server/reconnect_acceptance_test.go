@@ -71,8 +71,8 @@ func TestStreamableHTTPReconnectRestoresRemoteSession(t *testing.T) {
 	readArgs := map[string]any{"view": "file", "remote_session_id": remoteID, "path": "proof.txt"}
 	before := call(first, "read", readArgs)
 	beforeData, _ := before["data"].(map[string]any)
-	if beforeData["sha256"] == nil {
-		t.Fatal("缺少读回 SHA")
+	if beforeData["rev"] == nil || beforeData["sha256"] != nil {
+		t.Fatal("缺少 compact rev 或泄漏完整 SHA")
 	}
 	batchArgs := map[string]any{
 		"remote_session_id": remoteID, "purpose": "核对恢复前后同一读取操作",
@@ -124,7 +124,7 @@ func TestStreamableHTTPReconnectRestoresRemoteSession(t *testing.T) {
 	}
 	after := call(second, "read", readArgs)
 	afterData, _ := after["data"].(map[string]any)
-	if afterData["sha256"] != beforeData["sha256"] || afterData["content"] != beforeData["content"] {
+	if afterData["rev"] != beforeData["rev"] || afterData["content"] != beforeData["content"] {
 		t.Fatal("重连后文件身份或内容改变")
 	}
 	// 使用同一稳定提交身份恢复，不因 HTTP/Runtime 重启生成新操作。

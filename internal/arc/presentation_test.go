@@ -8,15 +8,14 @@ import (
 func TestRenderContentRendersCodeChangeDiff(t *testing.T) {
 	diff := "diff --git a/demo.go b/demo.go\nindex 111..222 100644\n--- a/demo.go\n+++ b/demo.go\n@@ -1,3 +1,3 @@\n const Value = 1\n-const Value = 2\n+const Value = 3\n"
 	data := map[string]any{
-		"edit_id":      "edit_1",
-		"results":      []any{map[string]any{"path": "demo.go", "operation": "update"}},
-		"diff_summary": diff,
+		"edit_id": "edit_1",
+		"results": []any{map[string]any{"path": "demo.go", "operation": "update", "diff": diff}},
 	}
 	text, ok := RenderContent("code_change", "diff", "summary text", data)
 	if !ok {
 		t.Fatal("code_change diff renderer must produce a dedicated view")
 	}
-	for _, want := range []string{"### Edit edit_1", "| `demo.go` | update | +1 −1 |", "```diff", "-const Value = 2", "+const Value = 3"} {
+	for _, want := range []string{"### Edit edit_1 · +1 −1", "#### `demo.go` · update · [-1,+1]", "```diff", "-const Value = 2", "+const Value = 3"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("rendered diff missing %q:\n%s", want, text)
 		}

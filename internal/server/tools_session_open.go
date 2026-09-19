@@ -20,8 +20,9 @@ import (
 	workspaceidentity "mcpx/internal/workspace"
 )
 
-// toolSessionOpen creates or reuses a Remote Session and returns a full bootstrap bundle
-// so clients need only one MCP call to start developing.
+// toolSessionOpen creates or reuses a Remote Session. New sessions return the full
+// bootstrap bundle; resumed sessions return dynamic state plus revisions so static
+// capability metadata is not repeatedly injected into model context.
 func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
@@ -42,6 +43,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	if remoteID == "" {
 		remoteID = strings.TrimSpace(envReq.RemoteSessionID)
 	}
+	resuming := remoteID != ""
 
 	workspaceName := strings.TrimSpace(envReq.Workspace)
 	if workspaceName == "" {
@@ -90,7 +92,10 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		gitIdentity = &identity
 	}
 	effective := r.effectiveConfig(wsPath)
-	tools := r.runtimeToolCapabilities(effective, &session)
+	var tools []map[string]any
+	if !resuming {
+		tools = r.runtimeToolCapabilities(effective, &session)
+	}
 
 	var (
 		servers              = []map[string]any{}
@@ -128,7 +133,9 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	}()
 	go func() {
 		defer bootstrap.Done()
-		project = inspectProject(ctx, wsPath)
+		if !resuming || includeProjectTasks {
+			project = inspectProject(ctx, wsPath)
+		}
 		if includeProjectTasks {
 			tasks = projecttask.Discover(wsPath)
 		}
@@ -140,8 +147,23 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	go func() {
 		defer bootstrap.Done()
 		pendingConfirmations = pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
-		taskList, _ = r.tasks.List(session.ID, 20)
-		artifacts, _ = r.artifacts.List(ctx, session.ID, "", 20)
+		taskLimit := 20
+		if resuming {
+			taskLimit = 100
+		}
+		recentTasks, _ := r.tasks.List(session.ID, taskLimit)
+		if resuming {
+			activeTasks := make([]map[string]any, 0, len(recentTasks))
+			for _, task := range recentTasks {
+				if fmt.Sprint(task["status"]) == "running" {
+					activeTasks = append(activeTasks, task)
+				}
+			}
+			taskList = activeTasks
+		} else {
+			taskList = recentTasks
+			artifacts, _ = r.artifacts.List(ctx, session.ID, "", 20)
+		}
 	}()
 	go func() {
 		defer bootstrap.Done()
@@ -186,9 +208,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 
 	data := map[string]any{
 		"remote_session_id": session.ID,
-		"mcpx": map[string]any{
-			"version": build.Version, "commit": build.Commit, "build_time": build.Date,
-		},
 		"remote_session": map[string]any{
 			"id": session.ID, "role": session.Role, "status": session.Status,
 			"version": session.Version, "label": session.Label, "description": session.Description,
@@ -198,33 +217,45 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 			"name": session.WorkspaceName, "path": session.WorkspacePath,
 			"git_head": gitHead, "tree_digest": treeDigest,
 		},
-		"revisions":       revisions,
-		"agent_guidance":  guidance,
-		"client_protocol": clientProtocol,
-		"tools":           tools,
-		"extension_inventory": map[string]any{
-			"skills":      compactSkillMaps(skills),
-			"mcp_servers": compactMCPServerInventory(servers),
-		},
-		"instructions":  instructionPayload,
-		"project":       project,
-		"project_tasks": tasks,
-		"git": map[string]any{
-			"head": gitHead, "tree_digest": treeDigest,
-		},
+		"revisions":             revisions,
 		"pending_confirmations": pendingConfirmations,
 		"tasks":                 taskList,
-		"artifacts":             artifacts,
-		"schema_source":         "tools/list",
-		"capability_version":    cleanCoreCapabilityVersion,
-		"capability_groups":     capabilityGroups(),
-		"recommended_workflows": map[string]any{
+	}
+	if resuming {
+		data["tasks_scope"] = "running"
+	}
+	if !resuming {
+		data["artifacts"] = artifacts
+		data["mcpx"] = map[string]any{
+			"version": build.Version, "commit": build.Commit, "build_time": build.Date,
+		}
+		data["extension_inventory"] = map[string]any{
+			"skills":      compactSkillMaps(skills),
+			"mcp_servers": compactMCPServerInventory(servers),
+		}
+		data["project"] = project
+		data["project_tasks"] = tasks
+		data["git"] = map[string]any{"head": gitHead, "tree_digest": treeDigest}
+		data["opened_at"] = time.Now().UTC().Format(time.RFC3339)
+		data["agent_guidance"] = guidance
+		data["client_protocol"] = clientProtocol
+		data["tools"] = tools
+		data["schema_source"] = "tools/list"
+		data["capability_version"] = cleanCoreCapabilityVersion
+		data["capability_groups"] = capabilityGroups()
+		data["recommended_workflows"] = map[string]any{
 			"bootstrap":      []string{"workspace", "session"},
 			"source_change":  []string{"read", "edit", "execute", "observe"},
 			"plan_delivery":  []string{"plan", "edit", "execute", "artifact", "observe"},
 			"extension_call": []string{"skill_tool", "mcp_tool"},
-		},
-		"opened_at": time.Now().UTC().Format(time.RFC3339),
+		}
+	}
+	if !resuming || includeInstrContent {
+		data["instructions"] = instructionPayload
+	}
+	if resuming && includeProjectTasks {
+		data["project"] = project
+		data["project_tasks"] = tasks
 	}
 	if latestModelState != nil {
 		data["latest_model_state"] = latestModelState
@@ -233,6 +264,7 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		data["git_identity"] = gitIdentity
 	}
 
+	r.bindRemoteSession(ctx, principal, session.ID)
 	r.logAudit(audit.Event{
 		RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName,
 		Tool: "session", Status: "ok",

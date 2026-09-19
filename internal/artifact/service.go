@@ -272,5 +272,5 @@ func fileDigest(path string) (string, error) {
 func randomID() string {
 	var value [12]byte
 	_, _ = rand.Read(value[:])
-	return "art_" + hex.EncodeToString(value[:])
+	return "art_" + base64.RawURLEncoding.EncodeToString(value[:])
 }

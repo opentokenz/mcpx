@@ -49,6 +49,7 @@ type FileEdit struct {
 	Path           string          `json:"path"`
 	Operation      string          `json:"operation"`
 	BaseSHA256     string          `json:"base_sha256,omitempty"`
+	Revision       string          `json:"rev,omitempty"`
 	Content        string          `json:"content,omitempty"`
 	NewPath        string          `json:"new_path,omitempty"`
 	Replacements   []Replacement   `json:"replacements,omitempty"`

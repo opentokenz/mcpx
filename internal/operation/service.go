@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1066,7 +1067,7 @@ func newID(prefix string) string {
 	if _, err := rand.Read(buf); err != nil {
 		return fmt.Sprintf("%s%d", prefix, time.Now().UnixNano())
 	}
-	return prefix + hex.EncodeToString(buf)
+	return prefix + base64.RawURLEncoding.EncodeToString(buf)
 }
 
 func boolInt(value bool) int {

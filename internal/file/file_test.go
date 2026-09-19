@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -76,6 +77,48 @@ func TestReadReturnsFileContent(t *testing.T) {
 	}
 	if !strings.Contains(r.Content, "hello") {
 		t.Fatal(r.Content)
+	}
+}
+
+func TestReadContinuesWithinLongUTF8Line(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "long.txt"), []byte("abcdef\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := Read(ReadOptions{WorkspaceRoot: root, Path: "long.txt", Offset: 0, Limit: 1, MaxBytes: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Content != "abc" || !first.Truncated {
+		t.Fatalf("first fragment=%+v", first)
+	}
+	second, err := Read(ReadOptions{WorkspaceRoot: root, Path: "long.txt", Offset: 0, LineByteOffset: 3, Limit: 1, MaxBytes: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Content != "def" || !second.Truncated {
+		t.Fatalf("second fragment=%+v", second)
+	}
+	third, err := Read(ReadOptions{WorkspaceRoot: root, Path: "long.txt", Offset: 0, LineByteOffset: 6, Limit: 1, MaxBytes: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Content != "\n" || third.Truncated {
+		t.Fatalf("final fragment=%+v", third)
+	}
+	if first.Content+second.Content+third.Content != "abcdef\n" {
+		t.Fatalf("fragments did not reconstruct source")
+	}
+}
+
+func TestReadRejectsLineByteOffsetInsideUTF8Rune(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "unicode.txt"), []byte("你a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(ReadOptions{WorkspaceRoot: root, Path: "unicode.txt", Offset: 0, LineByteOffset: 1, Limit: 1, MaxBytes: 8}); err == nil {
+		t.Fatal("line_byte_offset inside a UTF-8 rune must be rejected")
 	}
 }
 
@@ -173,6 +216,13 @@ func TestReadDecodesUTF16WindowAndPreservesRawSHA(t *testing.T) {
 	if window.Content != "two\n" || window.TotalLines != 3 || window.Format.Charset != "utf-16le" || window.Format.LineEnding != "mixed" {
 		t.Fatalf("decoded window=%+v", window)
 	}
+	fragment, err := Read(ReadOptions{WorkspaceRoot: root, Path: "utf16.txt", Offset: 1, LineByteOffset: 2, Limit: 1, MaxBytes: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fragment.Content != "o\n" || !fragment.Truncated {
+		t.Fatalf("utf16 line-byte continuation=%+v", fragment)
+	}
 	full, err := ReadFull(FullReadOptions{WorkspaceRoot: root, Path: "utf16.txt", MaxBytes: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
@@ -182,6 +232,65 @@ func TestReadDecodesUTF16WindowAndPreservesRawSHA(t *testing.T) {
 	}
 	if window.SHA256 == "" || window.SHA256 != full.SHA256 {
 		t.Fatalf("raw SHA mismatch: window=%q full=%q", window.SHA256, full.SHA256)
+	}
+}
+
+func TestReadUTF16WindowLongLineKeepsRetainedHeapBounded(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "utf16-long.txt")
+	handle, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.Write([]byte{0xff, 0xfe}); err != nil {
+		handle.Close()
+		t.Fatal(err)
+	}
+	block := make([]byte, 64<<10)
+	for index := 0; index < len(block); index += 2 {
+		block[index] = 'a'
+	}
+	remaining := 8 << 20
+	for remaining > 0 {
+		write := len(block)
+		if write > remaining {
+			write = remaining
+		}
+		if _, err := handle.Write(block[:write]); err != nil {
+			handle.Close()
+			t.Fatal(err)
+		}
+		remaining -= write
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatal(err)
+	}
+	block = nil
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	result, err := Read(ReadOptions{
+		WorkspaceRoot:  root,
+		Path:           "utf16-long.txt",
+		Offset:         0,
+		LineByteOffset: 2 << 20,
+		Limit:          1,
+		MaxBytes:       64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != strings.Repeat("a", 64) || !result.Truncated || result.TotalLines != 1 {
+		t.Fatalf("bounded UTF-16 window=%+v", result)
+	}
+
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(result)
+	if after.HeapAlloc > before.HeapAlloc+(1<<20) {
+		t.Fatalf("UTF-16 64-byte window retained too much heap: before=%d after=%d delta=%d", before.HeapAlloc, after.HeapAlloc, after.HeapAlloc-before.HeapAlloc)
 	}
 }
 

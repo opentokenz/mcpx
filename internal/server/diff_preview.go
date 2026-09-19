@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	cleanDiffFilePreviewMaxBytes  = 32 << 10
+	cleanDiffFilePreviewMaxBytes  = 64 << 10
 	cleanDiffTotalPreviewMaxBytes = 64 << 10
 	cleanDiffPageDefaultBytes     = 64 << 10
 	cleanDiffPageMaxBytes         = 256 << 10
@@ -88,12 +88,12 @@ func editResponseData(remoteSessionID, editID string, result edit.BatchResult, r
 	}
 	aggregate := boundedDiffPreview(result.DiffSummary, cleanDiffTotalPreviewMaxBytes)
 	data := map[string]any{
-		"status":              "succeeded",
-		"summary":             "updated " + itoa(len(result.Results)) + " path(s), total changed lines " + itoa(result.TotalChangedLines),
-		"edit_id":             editID,
-		"diff_summary":        aggregate.Text,
+		"status":  "succeeded",
+		"summary": "updated " + itoa(len(result.Results)) + " path(s), total changed lines " + itoa(result.TotalChangedLines),
+		"edit_id": editID,
+
 		"diff_bytes":          len(result.DiffSummary),
-		"preview_bytes":       aggregate.Bytes,
+		"preview_bytes":       cleanDiffTotalPreviewMaxBytes - remaining,
 		"diff_truncated":      aggregate.Truncated,
 		"total_changed_lines": result.TotalChangedLines,
 		"results":             files,

@@ -157,7 +157,7 @@ func TestCommandExecuteInlinesSmallOutputWithoutLogLink(t *testing.T) {
 	req := mcpresult.Request(map[string]any{
 		"intent":            "run a small command",
 		"remote_session_id": created.Session.ID,
-		"command":           "printf hello-stdout",
+		"command":           testPrintCommand("hello-stdout"),
 		"purpose":           "verify inline stdout rendering",
 		"scope":             "workspace",
 	})
@@ -202,7 +202,7 @@ func TestCommandExecuteTruncatedOutputStaysInline(t *testing.T) {
 	req := mcpresult.Request(map[string]any{
 		"intent":            "run a command with bounded output",
 		"remote_session_id": created.Session.ID,
-		"command":           "printf abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz",
+		"command":           testPrintCommand("abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz"),
 		"purpose":           "verify truncated output stays inline",
 		"scope":             "workspace",
 	})

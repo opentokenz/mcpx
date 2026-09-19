@@ -443,7 +443,7 @@ curl -sS -m 5 \
    在 `describe → call` 间维护和复核，不作为公开缓存字段。当前公开 Schema 不接受 `known_revisions` 参数。
 
 ARC 2.0 将工具 effect 与 Agent 语义轨迹分开：`purpose` 只描述本次工具操作的作用，
-`plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文。Client Protocol Activity V3 直接嵌入会话内 MCP 工具参数：可选 `activity` 对象允许同一次调用同时提供 `intent`、`hypothesis`、`evidence`、`conclusion`、`next`、`status`，但只应填写本次发生实质变化的字段，不重复未变化内容。`intent` 是整个工作 turn 的目标并开启新 turn；`hypothesis` 是待验证且可被推翻的暂定判断；`evidence` 只写刚获得的可核验事实；`conclusion` 写由 evidence 支持的当前判断；`next` 表示立即要执行且与当前 tool call 对齐的动作；`status` 只用于无法归入前五类的阶段、等待或阻塞变化。Runtime 按固定顺序展开非空字段，并自动生成 `turn_id`、`sequence`、`state=preparing_action`、`related_call_id`。旧 `/mcp/activity` HTTP ingress 已移除。服务端只把已经接受并持久化的真实 Activity snapshot 放入 `structuredContent.context.activity` 和 `_meta["mcpx.result"].mcpx.result.context.activity`；ARC 不直接复制 raw tool input，也不会从工具结果反推、伪造 Activity。`reasoning_summary`、`progress_summary`、`next_step` 不再属于 ARC context。
+`plan_id`、`plan_task_id`、`execution_task_id`、`operation_id` 用于绑定执行上下文。Client Protocol Activity V3 直接嵌入会话内 MCP 工具参数：可选 `activity` 对象允许同一次调用同时提供 `intent`、`hypothesis`、`evidence`、`conclusion`、`next`、`status`，但只应填写本次发生实质变化的字段，不重复未变化内容。`intent` 是整个工作 turn 的目标并开启新 turn；`hypothesis` 是待验证且可被推翻的暂定判断；`evidence` 只写刚获得的可核验事实；`conclusion` 写由 evidence 支持的当前判断；`next` 表示立即要执行且与当前 tool call 对齐的动作；`status` 只用于无法归入前五类的阶段、等待或阻塞变化。Runtime 按固定顺序展开非空字段，并自动生成 `turn_id`、`sequence`、`state=preparing_action`、`related_call_id`。旧 `/mcp/activity` HTTP ingress 已移除。服务端只把已经接受并持久化的真实 Activity snapshot 放入 `_meta["mcpx.result"].mcpx.result.context.activity` 和观测数据；模型侧 `structuredContent.context` 不再重复 Activity snapshot。ARC 不直接复制 raw tool input，也不会从工具结果反推、伪造 Activity。`reasoning_summary`、`progress_summary`、`next_step` 不再属于 ARC context。
 `move_out(action="submit")` 的业务参数只有 `action`、`remote_session_id`、`confirmation_uuid`；公共可选 `activity` 只记录公开工作轨迹，不改变 prepare 时由服务端冻结的业务语义。
 `progress` 不作为每个普通工具调用的 heartbeat；过程只在有业务意义的里程碑、等待、阻塞或失败时发布。任务正常完成并准备给用户最终回复前，必须调用一次 `progress(status="completed")`，用 `current` 汇总完成状态、`result` 列出已验证结果。
 
@@ -472,7 +472,9 @@ durable Store，再通过本地 JSONL 帧推送；`observe --format=json`、终�
 - `format.bom`：BOM 状态。
 - `format.line_ending` 和 `line_ending_counts`：`LF`、`CRLF`、`CR` 或 `mixed`。
 - `format.final_newline`：文件是否以换行符结尾。
-- `truncated`、`offset`、`limit` 和 `next_action`：窗口读取状态。
+- `truncated`、`offset`、`line_byte_offset` 和 `limit`：窗口读取状态；续读动作在模型侧统一位于 `structuredContent.actions`。
+
+当字节预算在一条逻辑行中间截断时，`offset` 会保持在该行，`line_byte_offset` 表示该行内模型侧 UTF-8 字节位置；服务端生成的 `structuredContent.actions` continuation 会同时携带二者。续读应原样复用 action arguments，不能只复制 `next_offset`，否则长行会从行首重复读取。
 
 生成变更时必须保留这些格式元数据。带 UTF-16 BOM 的文件会先以 Unicode 文本呈现，
 写回时恢复原字符集和 BOM。完整预览使用单个 `path` 和
@@ -498,7 +500,7 @@ scope 的第一层条目，并以 `kind=file|directory|symlink|other` 标记类�
 默认修改路径如下：
 
 ```text
-read(view="file") → edit → observe(view="changes")
+read(view="file") → edit → observe(view="diff", edit_id=...)
 ```
 
 `edit` 接收 `edits[]`，支持 create、update、rename；用户提出删除、移除或清理时必须使用专用的
@@ -528,8 +530,8 @@ Base64 解码后的文本字节原样落盘，不补换行、不转换 BOM 或�
    则从 prepare 开始明确写“安全移至系统回收站”，不能在 submit 时临时改写语义。
 2. 服务端返回 `confirmation_uuid`、`move_request_id`、`manifest_sha256`、原始
    `idempotency_key` 与 `expires_at` 供展示和审计；默认确认有效期为 30 分钟。同时返回
-   `next_action.tool="move_out"`，其 arguments 只含 `action="submit"`、`remote_session_id` 和 `confirmation_uuid`。
-3. 网页端模型向用户展示冻结清单并询问；用户确认后，模型原样执行服务端返回的 `next_action`。
+   模型侧使用 `hints.preferred_behavior="ask_confirm"` 进入确认流程；submit 不作为可自动执行的普通 action。
+3. 网页端模型向用户展示冻结清单并询问；用户确认后，使用返回的 `confirmation_uuid` 调用 `move_out(action="submit", remote_session_id=..., confirmation_uuid=...)`。
    `move_out(action="submit")` 的 strict schema 不接受 `purpose`、`workspace`、`targets`、`idempotency_key`、
    `manifest_sha256` 或其他 prepare 参数。
 4. `move_out(action="submit")` 按 UUID 从服务端取回并重新校验 Workspace 范围、manifest、文件 SHA、过期时间和
@@ -568,7 +570,7 @@ absolute path、`..` 越界和中间 symlink 仍拒绝。`move_out` 在 MCP `too
 ```
 
 普通变更保持原文件字符集、BOM、换行和末尾换行状态。版本冲突、匹配失败和策略
-错误都会返回结构化 `error.code`、`retryable`、`recovery` 或 `next_action`。
+错误都会返回结构化 `error.code`、`retryable` 等错误事实；可执行 continuation/recovery 在模型侧统一放入 `structuredContent.actions`，不再在 data/error 中重复动作参数。
 
 ### 4. 执行命令和 Task
 
@@ -578,7 +580,6 @@ absolute path、`..` 越界和中间 symlink 仍拒绝。`move_out` 在 MCP `too
   "action": "run",
   "command": "go test ./internal/server -count=1",
   "purpose": "验证本次服务端变更",
-  "scope": "workspace",
   "yield_time_ms": 10000
 }
 ```
@@ -657,7 +658,7 @@ operation_manage(action="result", operation_id="op_...")
 ```
 
 不要通过重复 `status` 轮询等待同一个操作；运行中的操作会返回一次性的
-`next_action`，通常应直接执行一次 `wait`。`operation_manage` 的批量模式只接受
+`structuredContent.actions` continuation，通常应直接执行一次 `wait`。`operation_manage` 的批量模式只接受
 `operation_ids`，且仅支持 `status` 和 `result`，不能把它再次嵌套进
 `operation_batch`。
 
@@ -694,20 +695,12 @@ mcpx://remote-sessions/{remote_session_id}/tasks/{execution_task_id}/logs
 mcpx://remote-sessions/{remote_session_id}/artifacts/{artifact_id}
 ```
 
-ARC 2.0 的 `structuredContent.context` 保持精简，只携带当前结果真正存在的语义与关联字段：
+ARC 2.0 的 `structuredContent.context` 保持精简，只携带当前结果真正存在的业务语义与关联字段：
 
 ```json
 {
   "context": {
     "purpose": "验证命令执行结果",
-    "activity": {
-      "turn_id": "turn_...",
-      "sequence": 3,
-      "state": "preparing_action",
-      "kind": "evidence",
-      "summary": "相关测试已通过",
-      "related_call_id": "call_..."
-    },
     "plan_id": "pl_...",
     "plan_task_id": "pt_...",
     "execution_task_id": "task_...",
@@ -716,8 +709,7 @@ ARC 2.0 的 `structuredContent.context` 保持精简，只携带当前结果真�
 }
 ```
 
-其中 `activity` 来自 Runtime 已接受并持久化的 Client Protocol Activity snapshot；字段不存在时不会
-为了填满结构而伪造。旧的 `reasoning_summary`、`progress_summary`、`next_step` 不属于公开 ARC context，
+Activity snapshot 不再复制到模型侧 `structuredContent.context`；需要用户展示、审计或观测时，从 `_meta["mcpx.result"].mcpx.result.context.activity` 或 Runtime 观测数据读取。工具 timing 同样不在模型侧 `structuredContent` 重复，仍保留在 ARC trace metadata 与观测链路。字段不存在时不会为了填满结构而伪造。旧的 `reasoning_summary`、`progress_summary`、`next_step` 不属于公开 ARC context，
 语义轨迹统一通过 `activity` 表达。`progress` 负责用户可见的阶段与终态：过程按需发布里程碑、等待、阻塞或失败；正常任务在最终回复前固定发布一次 `completed`，并在 `result` 中列出已验证结果。新的 `session` bootstrap 还会返回最新的 model progress state（若存在）。
 
 终端文本按可用信息展示 `purpose`、最新 Activity 以及 Plan / Plan Task / Execution Task / Operation
@@ -764,6 +756,7 @@ Windows 上可以用托盘常驻管理服务：
 - 公网启动前会拒绝 `auth.mode: open`，并自动打开 MCPX 反向代理所需的 Host / proxy header 设置。
 - 开启「公网 Origin 自动联动 OAuth server_url」后，Named Tunnel 会在启动前同步 `auth.oauth.server_url`；Quick Tunnel 会在取得临时公网地址后同步，并按需重启 MCPX 使 OAuth metadata 立即使用新 Origin。
 - 「健康检查」同时检查 cloudflared、MCPX 本地端点、Tunnel 进程、公网 `/mcp` 和 OAuth metadata；cloudflared 输出单独写入 `~/.mcpx/logs/cloudflared.log`。
+- 可开启「自动健康检查并故障恢复」：Desktop 每 30 秒检查一次，连续 2 次出现本地 MCP、Tunnel、公网 MCP 或 5xx/网络类 OAuth metadata 异常时，会自动重启本地 MCPX 与 Cloudflare Tunnel，并设置 2 分钟冷却避免重启风暴；手动停止 Tunnel 会解除自动恢复，重新启动后再次生效。
 - 系统托盘的 **Cloudflare Tunnel** 子菜单会实时显示 Tunnel 状态和公网 MCP URL，并可直接启动 / 停止、运行健康检查、复制公网 MCP URL；健康检查结果会缓存显示为「正常 / 异常」，Tunnel 状态变化后自动失效。
 
 Quick Tunnel 适合临时开发和连通性验证；Cloudflare 官方说明 Quick Tunnel 不支持 SSE，因此需要稳定 URL、OAuth issuer

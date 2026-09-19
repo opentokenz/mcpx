@@ -43,6 +43,7 @@ type Target struct {
 	Path           string `json:"path"`
 	Kind           string `json:"kind"`
 	ExpectedSHA256 string `json:"expected_sha256"`
+	Revision       string `json:"rev,omitempty"`
 	LinkTarget     string `json:"link_target,omitempty"`
 	LinkSHA256     string `json:"link_sha256,omitempty"`
 	Size           int64  `json:"size"`

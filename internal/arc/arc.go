@@ -168,33 +168,23 @@ func WrapToolResult(tool string, runtime ResultContext, raw *mcp.CallToolResult)
 		content = append(content, item)
 	}
 	raw.Content = content
-	raw.StructuredContent = modelStructuredContent(status, resultType, resultData, data, semanticContext, runtime.Timing, hints, actions, raw.IsError)
+	raw.StructuredContent = modelStructuredContent(status, resultType, resultData, data, semanticContext, hints, actions, raw.IsError)
 	setMetadata(raw, envelope, resultType)
 	return raw
 }
 
 // modelStructuredContent is the machine contract for models.
-func modelStructuredContent(status, resultType string, resultData any, rawData map[string]any, semanticContext Context, timing Timing, hints Hints, actions []Action, isError bool) map[string]any {
+func modelStructuredContent(status, resultType string, resultData any, rawData map[string]any, semanticContext Context, hints Hints, actions []Action, isError bool) map[string]any {
 	payload := map[string]any{
 		"status":  status,
 		"type":    resultType,
 		"context": contextData(semanticContext),
-		"timing":  timingData(timing),
-		"data":    resultData,
+		"data":    modelBusinessData(resultData, rawData, isError),
 	}
-	if rawData != nil {
-		if errBody, ok := rawData["error"]; ok && errBody != nil {
-			payload["error"] = errBody
-		}
+	if errBody := modelErrorData(resultData, rawData, isError); errBody != nil {
+		payload["error"] = errBody
 	}
-	if isError && payload["error"] == nil && resultData != nil {
-		if asMap, ok := resultData.(map[string]any); ok {
-			if _, hasCode := asMap["code"]; hasCode {
-				payload["error"] = asMap
-			}
-		}
-	}
-	if hints.PreferredBehavior != "" {
+	if modelNeedsHint(status, hints.PreferredBehavior) {
 		payload["hints"] = hints
 	}
 	if len(actions) > 0 {
@@ -204,13 +194,67 @@ func modelStructuredContent(status, resultType string, resultData any, rawData m
 	return normalized
 }
 
-func timingData(timing Timing) map[string]any {
-	return map[string]any{
-		"started_at_ms":         timing.StartedAtMs,
-		"server_received_at_ms": timing.ReceivedAtMs,
-		"server_timestamp_ms":   timing.CompletedAtMs,
-		"network_latency_ms":    timing.NetworkLatencyMs,
-		"tool_duration_ms":      timing.ProcessingMs,
+func modelBusinessData(resultData any, rawData map[string]any, isError bool) any {
+	if isError || isErrorData(rawData) {
+		if inner, ok := rawData["data"].(map[string]any); ok {
+			return stripRecoveryFields(inner)
+		}
+		return map[string]any{}
+	}
+	if asMap, ok := resultData.(map[string]any); ok {
+		return stripRecoveryFields(asMap)
+	}
+	return resultData
+}
+
+func modelErrorData(resultData any, rawData map[string]any, isError bool) map[string]any {
+	if rawData != nil {
+		if errBody, ok := rawData["error"].(map[string]any); ok && errBody != nil {
+			return stripErrorRecoveryFields(errBody)
+		}
+	}
+	if isError {
+		if asMap, ok := resultData.(map[string]any); ok {
+			if _, hasCode := asMap["code"]; hasCode {
+				return stripErrorRecoveryFields(asMap)
+			}
+		}
+	}
+	return nil
+}
+
+func stripRecoveryFields(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	result := make(map[string]any, len(input))
+	for key, value := range input {
+		switch key {
+		case "next_action", "next_actions", "suggested_next", "recovery":
+			continue
+		default:
+			result[key] = value
+		}
+	}
+	return result
+}
+
+func stripErrorRecoveryFields(input map[string]any) map[string]any {
+	result := stripRecoveryFields(input)
+	if details, ok := result["details"].(map[string]any); ok {
+		result["details"] = stripRecoveryFields(details)
+	}
+	return result
+}
+
+func modelNeedsHint(status, behavior string) bool {
+	switch behavior {
+	case "ask_confirm", "continue":
+		return true
+	case "summarize":
+		return status == "failed" || status == "interrupted"
+	default:
+		return false
 	}
 }
 
@@ -227,9 +271,6 @@ func contextData(context Context) map[string]any {
 		if value != "" {
 			data[key] = value
 		}
-	}
-	if activity := activityData(context.Activity); activity != nil {
-		data["activity"] = activity
 	}
 	return data
 }
@@ -548,39 +589,97 @@ func boolValue(data map[string]any, key string) bool {
 }
 
 func actionsFrom(data map[string]any) []Action {
-	next, ok := data["next_action"].(map[string]any)
-	if !ok {
-		if inner, nestedOK := data["data"].(map[string]any); nestedOK {
-			next, ok = inner["next_action"].(map[string]any)
-		}
+	if semanticConfirmation(data) {
+		return nil
 	}
-	if !ok {
-		if rawError, errorOK := data["error"].(map[string]any); errorOK {
-			if details, detailsOK := rawError["details"].(map[string]any); detailsOK {
-				next, ok = details["next_action"].(map[string]any)
-				if !ok {
-					if actions, actionsOK := details["next_actions"].([]any); actionsOK && len(actions) > 0 {
-						next, ok = actions[0].(map[string]any)
-					}
+	var candidates []map[string]any
+	collect := func(source map[string]any) {
+		if source == nil {
+			return
+		}
+		for _, key := range []string{"next_action", "suggested_next", "recovery"} {
+			if action, ok := source[key].(map[string]any); ok {
+				candidates = append(candidates, action)
+			}
+		}
+		if rawActions, ok := source["next_actions"].([]any); ok {
+			for _, raw := range rawActions {
+				if action, ok := raw.(map[string]any); ok {
+					candidates = append(candidates, action)
 				}
 			}
 		}
 	}
-	if !ok {
-		return nil
+	collect(data)
+	if inner, ok := data["data"].(map[string]any); ok {
+		collect(inner)
 	}
-	tool, _ := next["tool"].(string)
-	args, _ := next["arguments"].(map[string]any)
+	if rawError, ok := data["error"].(map[string]any); ok {
+		collect(rawError)
+		if details, ok := rawError["details"].(map[string]any); ok {
+			collect(details)
+		}
+	}
+
+	seen := map[string]bool{}
+	actions := make([]Action, 0, len(candidates))
+	for _, candidate := range candidates {
+		action, ok := canonicalAction(candidate)
+		if !ok {
+			continue
+		}
+		encoded, _ := json.Marshal([]any{action.ID, action.Arguments})
+		key := string(encoded)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if len(actions) > 0 {
+			action.ID = fmt.Sprintf("%s_%d", action.ID, len(actions)+1)
+		}
+		actions = append(actions, action)
+	}
+	return actions
+}
+
+func semanticConfirmation(data map[string]any) bool {
+	status, _ := data["status"].(string)
+	if status == "waiting_confirmation" || status == "need_confirmation" {
+		return true
+	}
+	if inner, ok := data["data"].(map[string]any); ok {
+		confirmationRequired, _ := inner["confirmation_required"].(bool)
+		return confirmationRequired
+	}
+	return false
+}
+
+func canonicalAction(candidate map[string]any) (Action, bool) {
+	tool, _ := candidate["tool"].(string)
+	tool = strings.TrimSpace(tool)
+	if tool == "" {
+		return Action{}, false
+	}
+	args, _ := candidate["arguments"].(map[string]any)
 	if args == nil {
 		args = map[string]any{}
+		for key, value := range candidate {
+			switch key {
+			case "tool", "reason", "note", "label", "type", "confirm", "id":
+				continue
+			case "action":
+				if fmt.Sprint(value) == tool {
+					continue
+				}
+			}
+			args[key] = value
+		}
 	}
-	if tool == "" {
-		return nil
-	}
-	actionType := "continue"
-	confirm := false
 	label := "Continue with " + tool
-	return []Action{{ID: tool, Type: actionType, Label: label, Confirm: confirm, Arguments: args}}
+	if reason, _ := candidate["reason"].(string); strings.TrimSpace(reason) != "" {
+		label = reason
+	}
+	return Action{ID: tool, Type: "continue", Label: label, Confirm: false, Arguments: args}, true
 }
 
 func hasAnyKey(data map[string]any, keys ...string) bool {
@@ -751,8 +850,8 @@ func resultDataSchema(name string) map[string]any {
 				"operation": map[string]any{"type": "string"}, "diff": map[string]any{"type": "string"},
 				"diff_truncated": map[string]any{"type": "boolean"}, "new_sha256": map[string]any{"type": "string"},
 			}}},
-			"total_changed_lines": map[string]any{"type": "integer"}, "diff_summary": map[string]any{"type": "string"},
-			"diff_truncated": map[string]any{"type": "boolean"}, "applied": map[string]any{"type": "boolean"},
+			"total_changed_lines": map[string]any{"type": "integer"},
+			"diff_truncated":      map[string]any{"type": "boolean"}, "applied": map[string]any{"type": "boolean"},
 			"preview_only": map[string]any{"type": "boolean"}, "idempotent_replay": map[string]any{"type": "boolean"},
 		})
 	case SchemaTable:
@@ -836,53 +935,23 @@ func buildOutputSchema() json.RawMessage {
 		// result contract explicit while leaving tool-specific data open; the
 		// result type and the actual data fields are the stable discriminator.
 		"$id": "mcpx.structured_content.v" + Version, "type": "object",
-		"required":             []string{"status", "type", "context", "timing", "data"},
+		"required":             []string{"status", "type", "context", "data"},
 		"additionalProperties": false,
 		"properties": map[string]any{
 			"status": map[string]any{"type": "string", "enum": []string{"succeeded", "accepted", "waiting_confirmation", "interrupted", "failed"}},
 			"type":   map[string]any{"type": "string", "enum": typeValues},
 			"context": map[string]any{
-				"type": "object", "additionalProperties": false, "description": "ARC V2 公开执行上下文；语义轨迹只引用真实 Client Protocol Activity V2，不承载隐藏推理链",
+				"type": "object", "additionalProperties": false,
 				"properties": map[string]any{
-					"purpose": map[string]any{"type": "string", "description": "本次工具 effect 的用户目标或作用"},
-					"activity": map[string]any{
-						"type": "object", "additionalProperties": false, "description": "工具结果生成时该 Remote Session 最新接受的 Activity V2 snapshot",
-						"required": []string{"turn_id", "sequence", "state", "kind", "summary"},
-						"properties": map[string]any{
-							"turn_id": map[string]any{"type": "string"}, "sequence": map[string]any{"type": "integer", "minimum": 1},
-							"state":   map[string]any{"type": "string", "enum": []string{"turn_started", "thinking", "preparing_action", "waiting_tool", "reviewing_result", "responding", "waiting_user", "blocked", "turn_completed", "turn_failed"}},
-							"kind":    map[string]any{"type": "string", "enum": []string{"intent", "hypothesis", "evidence", "conclusion", "next", "status"}},
-							"summary": map[string]any{"type": "string"}, "related_call_id": map[string]any{"type": "string"},
-						},
-					},
+					"purpose": map[string]any{"type": "string"},
 					"plan_id": map[string]any{"type": "string"}, "plan_task_id": map[string]any{"type": "string"},
 					"execution_task_id": map[string]any{"type": "string"}, "operation_id": map[string]any{"type": "string"},
 				},
 			},
-			"timing": map[string]any{
-				"type": "object", "additionalProperties": false, "description": "本次工具调用的端到端时序；网络延迟由模型发送时间与服务端接收时间估算",
-				"required": []string{"started_at_ms", "server_received_at_ms", "server_timestamp_ms", "network_latency_ms", "tool_duration_ms"},
-				"properties": map[string]any{
-					"started_at_ms": map[string]any{"type": "integer"}, "server_received_at_ms": map[string]any{"type": "integer"},
-					"server_timestamp_ms": map[string]any{"type": "integer"}, "network_latency_ms": map[string]any{"type": "integer", "minimum": 0},
-					"tool_duration_ms": map[string]any{"type": "integer", "minimum": 0},
-				},
-			},
-			"data":  map[string]any{"type": "object", "additionalProperties": true, "description": "按 type 返回的业务结果；ID、SHA、路径、命令输出和分页游标均原样位于此处"},
-			"error": map[string]any{"type": "object", "additionalProperties": true},
-			"hints": map[string]any{
-				"type": "object", "properties": map[string]any{
-					"preferred_behavior": map[string]any{"type": "string", "enum": []string{"show_directly", "summarize", "ask_confirm", "continue"}},
-				},
-			},
-			"actions": map[string]any{"type": "array", "items": map[string]any{
-				"type": "object", "required": []string{"id", "type", "label", "confirm", "arguments"},
-				"properties": map[string]any{
-					"id": map[string]any{"type": "string"}, "type": map[string]any{"type": "string"},
-					"label": map[string]any{"type": "string"}, "confirm": map[string]any{"type": "boolean"},
-					"arguments": map[string]any{"type": "object"},
-				},
-			}},
+			"data":    map[string]any{"type": "object", "additionalProperties": true},
+			"error":   map[string]any{"type": "object", "additionalProperties": true},
+			"hints":   map[string]any{"type": "object"},
+			"actions": map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 		},
 	}
 	encoded, _ := json.Marshal(schema)

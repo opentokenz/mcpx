@@ -109,7 +109,15 @@ func openReadonlyConnection(ctx context.Context, workspaceRoot, database string)
 		return nil, nil, fmt.Errorf("sqlite database must be a regular file")
 	}
 
-	dsnURL := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	uriPath := filepath.ToSlash(absolute)
+	// SQLite file URIs require an absolute Windows drive path to carry a
+	// leading slash: C:/db.sqlite -> file:///C:/db.sqlite. Without it,
+	// modernc/sqlite parses the drive form incorrectly when URI parameters
+	// such as mode=ro are present.
+	if volume := filepath.VolumeName(absolute); len(volume) == 2 && volume[1] == ':' && !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsnURL := url.URL{Scheme: "file", Path: uriPath}
 	params := url.Values{}
 	params.Set("mode", "ro")
 	params.Add("_pragma", "query_only(1)")

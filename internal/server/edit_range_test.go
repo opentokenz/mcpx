@@ -23,7 +23,7 @@ func TestCleanCoreEditRangeUpdatePreservesFormat(t *testing.T) {
 		"remote_session_id": remoteID,
 		"purpose":           "replace two known lines without copying their previous contents",
 		"edits": []any{map[string]any{
-			"path": "range.txt", "operation": "update", "base_sha256": digestForTest(original),
+			"path": "range.txt", "operation": "update", "rev": compactFileRevision(digestForTest(original)),
 			"range": map[string]any{"start_line": 2, "end_line": 3, "replacement": "TWO\nTHREE"},
 		}},
 	})
@@ -68,7 +68,7 @@ func TestEditRangeSchemaAndOutOfBoundsRecovery(t *testing.T) {
 		"remote_session_id": remoteID,
 		"purpose":           "exercise range bounds recovery",
 		"edits": []any{map[string]any{
-			"path": "bounds.txt", "operation": "update", "base_sha256": digestForTest(original),
+			"path": "bounds.txt", "operation": "update", "rev": compactFileRevision(digestForTest(original)),
 			"range": map[string]any{"start_line": 2, "end_line": 3, "replacement": "x"},
 		}},
 	})

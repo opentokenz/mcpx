@@ -102,7 +102,7 @@ func TestReadSearchAndContextReturnRevisionByDefault(t *testing.T) {
 	})
 	searchData := search["data"].(map[string]any)
 	matches := searchData["matches"].([]any)
-	if len(matches) == 0 || matches[0].(map[string]any)["sha256"] == "" {
+	if len(matches) == 0 || matches[0].(map[string]any)["rev"] == "" {
 		t.Fatalf("search result must carry revision: %+v", searchData)
 	}
 
@@ -111,7 +111,7 @@ func TestReadSearchAndContextReturnRevisionByDefault(t *testing.T) {
 	})
 	contextData := contextResult["data"].(map[string]any)
 	files := contextData["files"].([]any)
-	if len(files) == 0 || files[0].(map[string]any)["sha256"] == "" {
+	if len(files) == 0 || files[0].(map[string]any)["rev"] == "" {
 		t.Fatalf("context result must carry revision: %+v", contextData)
 	}
 }

@@ -2,6 +2,7 @@ package remotesession
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -11,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 
 	"mcpx/internal/auth"
 )
@@ -161,11 +160,10 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 		}
 	}
 
-	sessionUUID, err := uuid.NewRandom()
+	sessionID, err := randomID("rs_", 12)
 	if err != nil {
 		return CreateResult{}, err
 	}
-	sessionID := sessionUUID.String()
 	session := Session{
 		ID: sessionID, WorkspaceName: in.WorkspaceName, WorkspacePath: in.WorkspacePath,
 		Label: in.Label, Description: in.Description, Status: "active",
@@ -538,6 +536,14 @@ func placeholders(count int) string {
 		return ""
 	}
 	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+func randomID(prefix string, size int) (string, error) {
+	b := make([]byte, size)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return prefix + base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func encodeCursor(at int64, id string) string {

@@ -87,6 +87,12 @@ func TestNormalizePublicOrigin(t *testing.T) {
 
 func TestStopCloudflareTunnelStopsTrackedProcess(t *testing.T) {
 	t.Setenv("MCPX_HOME", t.TempDir())
+	cfg := defaultCloudflareDesktopConfig()
+	cfg.DesiredRunning = true
+	if _, err := saveCloudflareDesktopConfig(cfg); err != nil {
+		t.Fatalf("save desired-running config: %v", err)
+	}
+
 	ping, err := exec.LookPath("ping")
 	if err != nil {
 		t.Skipf("ping not available: %v", err)
@@ -116,6 +122,13 @@ func TestStopCloudflareTunnelStopsTrackedProcess(t *testing.T) {
 	}
 	if _, err := readCloudflareProcessState(); err == nil {
 		t.Fatal("cloudflare process state should be removed after stop")
+	}
+	cfg, err = loadCloudflareDesktopConfig()
+	if err != nil {
+		t.Fatalf("load Cloudflare config after stop: %v", err)
+	}
+	if cfg.DesiredRunning {
+		t.Fatal("manual stop must clear desired_running so watchdog does not restart it")
 	}
 }
 
@@ -230,6 +243,51 @@ func TestCheckLocalMCPHealthDetectsDeadHTTP(t *testing.T) {
 	}
 	if !strings.Contains(got.Detail, "MCPX running") {
 		t.Fatalf("local MCP detail = %q, want process context", got.Detail)
+	}
+}
+
+func TestDefaultCloudflareDesktopConfigEnablesAutoRecovery(t *testing.T) {
+	cfg := defaultCloudflareDesktopConfig()
+	if !cfg.AutoRecover {
+		t.Fatal("auto recovery should be enabled by default")
+	}
+	if cfg.DesiredRunning {
+		t.Fatal("default config must not assume the Tunnel should already be running")
+	}
+}
+
+func TestCloudflareHealthNeedsAutoRecovery(t *testing.T) {
+	healthy := cloudflareHealth{OK: true}
+	if cloudflareHealthNeedsAutoRecovery(healthy) {
+		t.Fatal("healthy result must not trigger auto recovery")
+	}
+
+	public503 := cloudflareHealth{
+		Software:      cloudflareHealthItem{OK: true},
+		LocalMCP:      cloudflareHealthItem{OK: true},
+		TunnelProcess: cloudflareHealthItem{OK: true},
+		PublicMCP:     cloudflareHealthItem{StatusCode: http.StatusServiceUnavailable},
+		OAuthMetadata: cloudflareHealthItem{OK: true},
+	}
+	if !cloudflareHealthNeedsAutoRecovery(public503) {
+		t.Fatal("public MCP 503 should trigger auto recovery")
+	}
+
+	oauthMismatch := cloudflareHealth{
+		Software:      cloudflareHealthItem{OK: true},
+		LocalMCP:      cloudflareHealthItem{OK: true},
+		TunnelProcess: cloudflareHealthItem{OK: true},
+		PublicMCP:     cloudflareHealthItem{OK: true},
+		OAuthMetadata: cloudflareHealthItem{OK: false, StatusCode: http.StatusOK},
+	}
+	if cloudflareHealthNeedsAutoRecovery(oauthMismatch) {
+		t.Fatal("OAuth origin mismatch with reachable metadata is configuration, not a restart condition")
+	}
+
+	oauth503 := oauthMismatch
+	oauth503.OAuthMetadata.StatusCode = http.StatusServiceUnavailable
+	if !cloudflareHealthNeedsAutoRecovery(oauth503) {
+		t.Fatal("OAuth metadata 503 should trigger auto recovery")
 	}
 }
 

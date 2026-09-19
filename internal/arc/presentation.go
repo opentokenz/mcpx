@@ -140,13 +140,16 @@ func renderCodeChange(data map[string]any) string {
 	if editID != "" {
 		fmt.Fprintf(&b, "### Edit %s", editID)
 	}
+	files := changeFiles(data["results"])
 	diffText, _ := data["diff_summary"].(string)
+	if diffText == "" {
+		diffText = combinedFileDiffs(files)
+	}
 	totalAdded, totalRemoved := countDiffLines(diffText)
 	if totalAdded > 0 || totalRemoved > 0 {
 		fmt.Fprintf(&b, " · +%d −%d", totalAdded, totalRemoved)
 	}
 	fileStats := diffStatsByPath(diffText)
-	files := changeFiles(data["results"])
 	fileDiffRendered := hasFileDiffs(files)
 	var fileDiffTruncated bool
 	if len(files) > 0 && !fileDiffRendered {
@@ -197,6 +200,21 @@ func changeFiles(value any) []map[string]any {
 	default:
 		return nil
 	}
+}
+
+func combinedFileDiffs(files []map[string]any) string {
+	var builder strings.Builder
+	for _, file := range files {
+		diff, _ := file["diff"].(string)
+		if strings.TrimSpace(diff) == "" {
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteByte('\n')
+		}
+		builder.WriteString(diff)
+	}
+	return builder.String()
 }
 
 func renderFileDiffs(builder *strings.Builder, files []map[string]any) (rendered, truncated bool) {

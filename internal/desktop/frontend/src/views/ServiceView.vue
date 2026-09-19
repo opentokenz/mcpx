@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   api,
+  type BrowserIntegrationState,
   type CloudflareConfig,
   type CloudflareState,
   type ConnectionConfig,
@@ -10,6 +11,8 @@ import {
 
 const state = ref<ServiceState | null>(null)
 const cloudflare = ref<CloudflareState | null>(null)
+const browser = ref<BrowserIntegrationState | null>(null)
+const browserError = ref('')
 const cloudflareConfig = ref<CloudflareConfig | null>(null)
 const config = ref<ConnectionConfig | null>(null)
 const error = ref('')
@@ -27,6 +30,19 @@ const statusText: Record<string, string> = {
   stopped: '已停止',
 }
 
+const browserStatusText: Record<BrowserIntegrationState['state'], string> = {
+  connected: '浏览器扩展已连接',
+  installed_disconnected: '扩展已安装，但未连接',
+  not_installed: '未检测到浏览器扩展',
+}
+
+const browserStatusClass = computed(() => {
+  if (browserError.value) return 'conflict'
+  if (browser.value?.state === 'connected') return 'running'
+  if (browser.value?.state === 'installed_disconnected') return 'starting'
+  return 'stopped'
+})
+
 // 受托盘/CLI 管理的进程才可以停止或重启。端口冲突时的占用者不归我们管，
 // 也不该被我们停掉。
 const managed = computed(() => {
@@ -42,6 +58,10 @@ const startSatisfied = computed(() => {
 })
 
 async function refresh() {
+  const browserRequest = api.browserStatus().then(
+    (value) => ({ value, error: '' }),
+    (err: Error) => ({ value: null, error: err.message }),
+  )
   try {
     const [serviceState, cloudflareState, tunnelConfig] = await Promise.all([
       api.status(),
@@ -54,6 +74,9 @@ async function refresh() {
   } catch (err) {
     error.value = (err as Error).message
   }
+  const browserResult = await browserRequest
+  browser.value = browserResult.value
+  browserError.value = browserResult.error
 }
 
 async function act(action: 'start' | 'stop' | 'restart') {
@@ -66,6 +89,14 @@ async function act(action: 'start' | 'stop' | 'restart') {
     error.value = (err as Error).message
   } finally {
     busy.value = false
+  }
+}
+
+async function openBrowserHelp() {
+  try {
+    await api.openBrowserHelp()
+  } catch (err) {
+    error.value = (err as Error).message
   }
 }
 
@@ -189,6 +220,33 @@ onUnmounted(() => window.clearInterval(timer))
     </div>
 
     <div v-else class="empty">读取状态中…</div>
+
+    <div class="card">
+      <div class="row">
+        <h2 class="card-title" style="margin: 0">浏览器扩展</h2>
+        <span class="status-dot" :class="browserStatusClass"></span>
+        <span v-if="browserError" class="status-headline" style="font-size: 14px">状态读取失败</span>
+        <span v-else-if="browser" class="status-headline" style="font-size: 14px">
+          {{ browserStatusText[browser.state] }}
+        </span>
+        <span class="spacer"></span>
+        <button v-if="browser?.state !== 'connected'" class="btn" @click="refresh">重新检测</button>
+        <button v-if="browser?.state !== 'connected'" class="btn primary" @click="openBrowserHelp">
+          {{ browser?.state === 'not_installed' ? '打开官方安装说明' : '打开官方帮助' }}
+        </button>
+      </div>
+      <p v-if="browserError" class="hint" style="color: var(--warn)">{{ browserError }}</p>
+      <p v-else-if="browser" class="hint">{{ browser.message }}</p>
+      <dl v-if="browser?.installations.length" class="facts">
+        <template v-for="item in browser.installations" :key="`${item.family}:${item.profile}:${item.extension_id}`">
+          <dt>{{ item.family }} / {{ item.profile }}</dt>
+          <dd>ChatGPT {{ item.version }} · {{ item.extension_id }}</dd>
+        </template>
+      </dl>
+      <p v-if="browser?.state === 'installed_disconnected'" class="hint" style="color: var(--warn)">
+        MCPX 已识别本机安装，无需手工配置扩展 ID。若长时间未连接，请确认浏览器和扩展均已启动。
+      </p>
+    </div>
 
     <div class="card">
       <div class="row">

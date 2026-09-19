@@ -138,9 +138,9 @@ func TestCleanCoreEditAppliesIdempotentlyAndReportsStale(t *testing.T) {
 		"purpose":           "update the file labels",
 		"idempotency_key":   "edit-test-1",
 		"edits": []map[string]any{{
-			"path":        "edit.txt",
-			"operation":   "update",
-			"base_sha256": digestForTest(original),
+			"path":      "edit.txt",
+			"operation": "update",
+			"rev":       compactFileRevision(digestForTest(original)),
 			"replacements": []map[string]any{
 				{"match": "title: old", "replacement": "title: new"},
 				{"match": "color: red", "replacement": "color: blue"},
@@ -155,8 +155,15 @@ func TestCleanCoreEditAppliesIdempotentlyAndReportsStale(t *testing.T) {
 	if data["total_changed_lines"] != float64(4) && data["total_changed_lines"] != 4 {
 		t.Fatalf("edit changed lines=%v", data["total_changed_lines"])
 	}
-	if diff, _ := data["diff_summary"].(string); !strings.Contains(diff, "+title: new") {
-		t.Fatalf("diff summary=%q", diff)
+	if data["diff_summary"] != nil {
+		t.Fatalf("edit response must not expose duplicate diff_summary: %+v", data)
+	}
+	results, _ := data["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("edit results=%+v", data["results"])
+	}
+	if diff, _ := results[0].(map[string]any)["diff"].(string); !strings.Contains(diff, "+title: new") {
+		t.Fatalf("per-file diff=%q", diff)
 	}
 	content, _ := os.ReadFile(path)
 	if string(content) != "title: new\ncolor: blue\n" {
@@ -173,15 +180,15 @@ func TestCleanCoreEditAppliesIdempotentlyAndReportsStale(t *testing.T) {
 		"remote_session_id": remoteID,
 		"purpose":           "test stale revision",
 		"edits": []map[string]any{{
-			"path": "edit.txt", "operation": "update", "base_sha256": "sha256:stale",
+			"path": "edit.txt", "operation": "update", "rev": compactFileRevision(digestForTest([]byte("stale"))),
 			"replacements": []map[string]any{{"match": "title: new", "replacement": "title: newest"}},
 		}},
 	})
 	if statusOK(stale) || errorCode(stale) != "stale_revision" {
 		t.Fatalf("stale response=%+v", stale)
 	}
-	if details, _ := stale["error"].(map[string]any)["details"].(map[string]any); details["current_sha256"] == nil {
-		t.Fatalf("stale response missing current sha: %+v", stale)
+	if details, _ := stale["error"].(map[string]any)["details"].(map[string]any); details["current_rev"] == nil || details["current_sha256"] != nil {
+		t.Fatalf("stale response missing compact current_rev or leaking sha256: %+v", stale)
 	}
 }
 
@@ -237,7 +244,7 @@ func TestCleanCoreEditUsesContextualDiffForSmallChangeInLargeFile(t *testing.T) 
 		"purpose":           "preview one line in a large file",
 		"apply":             false,
 		"edits": []map[string]any{{
-			"path": "large-small-change.txt", "operation": "update", "base_sha256": digestForTest([]byte(old)),
+			"path": "large-small-change.txt", "operation": "update", "rev": compactFileRevision(digestForTest([]byte(old))),
 			"replacements": []map[string]any{{"match": "line-400", "replacement": "line-400 changed"}},
 		}},
 	})
@@ -245,7 +252,11 @@ func TestCleanCoreEditUsesContextualDiffForSmallChangeInLargeFile(t *testing.T) 
 		t.Fatalf("dry-run edit failed: %+v", response)
 	}
 	data := response["data"].(map[string]any)
-	preview, _ := data["diff_summary"].(string)
+	if data["diff_summary"] != nil {
+		t.Fatalf("small edit must not duplicate diff_summary: %+v", data)
+	}
+	results, _ := data["results"].([]any)
+	preview, _ := results[0].(map[string]any)["diff"].(string)
 	if data["diff_truncated"] == true || len(preview) > 1024 {
 		t.Fatalf("small edit should have a compact contextual diff: bytes=%d data=%+v", len(preview), data)
 	}
@@ -275,26 +286,37 @@ func TestCleanCoreEditBoundsLargeDiffAndPaginatesFullDiff(t *testing.T) {
 		"purpose":           "replace a large generated block",
 		"idempotency_key":   "large-diff-1",
 		"edits": []map[string]any{{
-			"path": "large.txt", "operation": "update", "base_sha256": digestForTest([]byte(old)), "content": updated,
+			"path": "large.txt", "operation": "update", "rev": compactFileRevision(digestForTest([]byte(old))), "content": updated,
 		}},
 	})
 	if !statusOK(response) {
 		t.Fatalf("large edit failed: %+v", response)
 	}
 	data := response["data"].(map[string]any)
-	preview, _ := data["diff_summary"].(string)
-	if data["diff_truncated"] != true || len(preview) > cleanDiffTotalPreviewMaxBytes || data["edit_id"] == "" {
-		t.Fatalf("large diff was not bounded: bytes=%d data=%+v", len(preview), data)
+	if data["diff_summary"] != nil {
+		t.Fatalf("large edit must not duplicate diff_summary: %+v", data)
+	}
+	results, _ := data["results"].([]any)
+	preview, _ := results[0].(map[string]any)["diff"].(string)
+	if data["diff_truncated"] != true || len(preview) > cleanDiffTotalPreviewMaxBytes || len(preview) <= 32<<10 || data["edit_id"] == "" {
+		t.Fatalf("large single-file diff must retain up to the 64 KiB total preview budget: bytes=%d data=%+v", len(preview), data)
 	}
 	if diffBytes, _ := data["diff_bytes"].(float64); diffBytes <= float64(cleanDiffTotalPreviewMaxBytes) {
 		t.Fatalf("large diff byte count=%v", data["diff_bytes"])
 	}
 	editID := data["edit_id"].(string)
-	removedDiff := callEnvelope(t, rt.toolObserve, context.Background(), map[string]any{
+	diffPage := callEnvelope(t, rt.toolObserve, context.Background(), map[string]any{
 		"remote_session_id": remoteID, "view": "diff", "edit_id": editID, "offset": 0, "limit": 1024,
 	})
-	if statusOK(removedDiff) || errorCode(removedDiff) != "invalid_action" {
-		t.Fatalf("observe diff must be rejected: %+v", removedDiff)
+	if !statusOK(diffPage) {
+		t.Fatalf("observe diff failed: %+v", diffPage)
+	}
+	diffPageData, _ := diffPage["data"].(map[string]any)
+	if diffPageData["edit_id"] != editID || diffPageData["diff"] == "" || diffPageData["next_offset"] == nil {
+		t.Fatalf("observe diff page incomplete: %+v", diffPageData)
+	}
+	if diffPageData["diff_summary"] != nil {
+		t.Fatalf("observe diff must expose a single authoritative diff body: %+v", diffPageData)
 	}
 
 	events, _, err := rt.observation.store.Query(context.Background(), observation.HistoryQuery{
@@ -317,11 +339,11 @@ func TestCleanCoreEditBoundsLargeDiffAndPaginatesFullDiff(t *testing.T) {
 	if observed == nil {
 		t.Fatalf("file.changed observation for %s not found", editID)
 	}
-	results, _ := observed["results"].([]any)
-	if len(results) != 1 {
+	observedResults, _ := observed["results"].([]any)
+	if len(observedResults) != 1 {
 		t.Fatalf("observed results=%+v", observed["results"])
 	}
-	file, _ := results[0].(map[string]any)
+	file, _ := observedResults[0].(map[string]any)
 	fullDiff, _ := file["diff"].(string)
 	if len(fullDiff) <= cleanDiffFilePreviewMaxBytes || !strings.Contains(fullDiff, strings.TrimSpace(newText)) {
 		t.Fatalf("observation did not retain full diff: bytes=%d", len(fullDiff))
@@ -338,17 +360,17 @@ func TestCleanCoreEditRejectsIdempotencyFingerprintConflict(t *testing.T) {
 	}
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
-	base := digestForTest(original)
+	base := compactFileRevision(digestForTest(original))
 	first := map[string]any{
 		"remote_session_id": remoteID, "purpose": "first", "idempotency_key": "same-key",
-		"edits": []map[string]any{{"path": "conflict.txt", "operation": "update", "base_sha256": base, "replacements": []map[string]any{{"match": "old", "replacement": "new"}}}},
+		"edits": []map[string]any{{"path": "conflict.txt", "operation": "update", "rev": base, "replacements": []map[string]any{{"match": "old", "replacement": "new"}}}},
 	}
 	if response := callEnvelope(t, rt.toolEdit, context.Background(), first); !statusOK(response) {
 		t.Fatalf("first edit failed: %+v", response)
 	}
 	conflict := map[string]any{
 		"remote_session_id": remoteID, "purpose": "different", "idempotency_key": "same-key",
-		"edits": []map[string]any{{"path": "conflict.txt", "operation": "update", "base_sha256": base, "replacements": []map[string]any{{"match": "old", "replacement": "other"}}}},
+		"edits": []map[string]any{{"path": "conflict.txt", "operation": "update", "rev": base, "replacements": []map[string]any{{"match": "old", "replacement": "other"}}}},
 	}
 	response := callEnvelope(t, rt.toolEdit, context.Background(), conflict)
 	if statusOK(response) || errorCode(response) != "idempotency_conflict" {
@@ -378,11 +400,14 @@ func TestCleanCoreUTF16ReadEditRoundTripPreservesRawBytes(t *testing.T) {
 	if item["content"] != logical || item["encoding"] != "utf-8" {
 		t.Fatalf("decoded UTF-16 payload=%+v", item)
 	}
-	baseSHA, _ := item["sha256"].(string)
+	rev, _ := item["rev"].(string)
+	if rev == "" || item["sha256"] != nil {
+		t.Fatalf("UTF-16 read must return compact rev only: %+v", item)
+	}
 	response := callEnvelope(t, rt.toolEdit, context.Background(), map[string]any{
 		"remote_session_id": remoteID, "purpose": "update UTF-16 text", "idempotency_key": "utf16-roundtrip-1",
 		"edits": []map[string]any{{
-			"path": "utf16-edit.txt", "operation": "update", "base_sha256": baseSHA,
+			"path": "utf16-edit.txt", "operation": "update", "rev": rev,
 			"replacements": []map[string]any{{"match": "第三行", "replacement": "第三行-已改"}},
 		}},
 	})
@@ -397,8 +422,8 @@ func TestCleanCoreUTF16ReadEditRoundTripPreservesRawBytes(t *testing.T) {
 	if string(updated) != string(want) {
 		t.Fatalf("UTF-16 raw bytes changed unexpectedly: got %x want %x", updated, want)
 	}
-	if digestForTest(updated) == baseSHA {
-		t.Fatal("UTF-16 edit did not change raw SHA")
+	if compactFileRevision(digestForTest(updated)) == rev {
+		t.Fatal("UTF-16 edit did not advance compact revision")
 	}
 }
 
@@ -431,7 +456,7 @@ func TestCleanEditApplyFalseNeverMutatesFilesystem(t *testing.T) {
 		"purpose":           "preview a change without applying it",
 		"apply":             false,
 		"edits": []any{map[string]any{
-			"path": "dry-run.txt", "operation": "update", "base_sha256": digestForTest(original),
+			"path": "dry-run.txt", "operation": "update", "rev": compactFileRevision(digestForTest(original)),
 			"replacements": []any{map[string]any{"match": "before", "replacement": "after"}},
 		}},
 	})
@@ -452,7 +477,7 @@ func TestCleanEditApplyFalseNeverMutatesFilesystem(t *testing.T) {
 	deletePreview := callEnvelope(t, rt.toolEdit, context.Background(), map[string]any{
 		"remote_session_id": remoteID, "purpose": "ensure delete preview cannot mutate",
 		"apply": false,
-		"edits": []any{map[string]any{"path": "dry-run.txt", "operation": "delete", "base_sha256": digestForTest(original)}},
+		"edits": []any{map[string]any{"path": "dry-run.txt", "operation": "delete"}},
 	})
 	if statusOK(deletePreview) || errorCode(deletePreview) != "move_out_required" {
 		t.Fatalf("edit delete must route to move_out(action=prepare): %+v", deletePreview)

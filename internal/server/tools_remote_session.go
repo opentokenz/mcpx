@@ -53,11 +53,14 @@ func (r *Runtime) touchRemoteSessionActivity(ctx context.Context, req envelope.R
 		return
 	}
 	sessionID := strings.TrimSpace(req.RemoteSessionID)
-	if sessionID == "" {
-		return
-	}
 	principal, err := r.principalFromContext(ctx)
 	if err != nil {
+		return
+	}
+	if sessionID == "" {
+		sessionID = r.boundRemoteSessionID(ctx, principal)
+	}
+	if sessionID == "" {
 		return
 	}
 	name, version := clientInfoFromContext(ctx)
@@ -74,6 +77,9 @@ func (r *Runtime) remoteRequest(ctx context.Context, req *mcp.CallToolRequest) (
 		resp := envelope.Fail(envelope.StatusUnauthorized, envReq.RequestID, envReq.Workspace, nil, "unauthorized", "invalid or missing token")
 		out, _ := r.resultJSON(resp)
 		return envReq, auth.Principal{}, out
+	}
+	if strings.TrimSpace(envReq.RemoteSessionID) == "" && toolInvocationName(ctx) != "session" {
+		envReq.RemoteSessionID = r.boundRemoteSessionID(ctx, principal)
 	}
 	return envReq, principal, nil
 }
@@ -235,6 +241,7 @@ func (r *Runtime) toolRemoteSessionClose(ctx context.Context, req *mcp.CallToolR
 		}
 	}
 	r.discoveryMu.Unlock()
+	r.unbindRemoteSession(ctx, principal, remoteSessionID)
 	return r.remoteResult(envReq, remoteSessionID, session.WorkspaceName, session)
 }
 

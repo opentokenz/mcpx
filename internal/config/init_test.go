@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -22,7 +23,7 @@ func TestEnsureGlobalLayoutCreatesFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := configInfo.Mode().Perm(); got != 0o600 {
+	if got := configInfo.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
 		t.Fatalf("config mode %o, want 600", got)
 	}
 	b, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
@@ -33,7 +34,7 @@ func TestEnsureGlobalLayoutCreatesFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := mcpInfo.Mode().Perm(); got != 0o600 {
+	if got := mcpInfo.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
 		t.Fatalf("mcp file mode %o, want 600", got)
 	}
 	var f MCPFile

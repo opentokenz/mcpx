@@ -18,15 +18,44 @@ func TestReadBatchContinuationAdvancesToNextWindow(t *testing.T) {
 	if !first.Truncated || len(first.ContinueRequests) != 1 {
 		t.Fatalf("expected continuation: %+v", first)
 	}
-	if first.ContinueRequests[0].Offset <= request.Offset {
-		t.Fatalf("continuation did not advance: %+v", first.ContinueRequests[0])
+	if first.ContinueRequests[0].Offset != 1 || first.ContinueRequests[0].LineByteOffset != 1 {
+		t.Fatalf("continuation cursor=%+v, want line 1 byte 1", first.ContinueRequests[0])
 	}
 	second := ReadBatch(root, first.ContinueRequests, 1<<20, 1<<20, nil)
 	if len(second.Results) != 1 || !second.Results[0].OK {
 		t.Fatalf("continuation read failed: %+v", second)
 	}
-	if strings.Contains(second.Results[0].Content, "zero") || !strings.Contains(second.Results[0].Content, "one") {
-		t.Fatalf("continuation lost or repeated a line: %q", second.Results[0].Content)
+	if combined := first.Results[0].Content + second.Results[0].Content; combined != content {
+		t.Fatalf("continuation lost or repeated bytes: %q want %q", combined, content)
+	}
+}
+
+func TestReadBatchContinuationCompletesPartialLongLine(t *testing.T) {
+	root := t.TempDir()
+	const want = "abcdef\nnext\n"
+	if err := os.WriteFile(filepath.Join(root, "long.txt"), []byte(want), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requests := []BatchReadRequest{{Path: "long.txt", Offset: 0, Limit: 2}}
+	var combined strings.Builder
+	for page := 0; page < 10 && len(requests) > 0; page++ {
+		result := ReadBatch(root, requests, 1<<20, 3, nil)
+		if len(result.Results) != 1 || !result.Results[0].OK {
+			t.Fatalf("page %d result=%+v", page, result)
+		}
+		combined.WriteString(result.Results[0].Content)
+		requests = result.ContinueRequests
+		if page == 0 {
+			if len(requests) != 1 || requests[0].Offset != 0 || requests[0].LineByteOffset != 3 {
+				t.Fatalf("first continuation must advance within line: %+v", requests)
+			}
+		}
+	}
+	if len(requests) != 0 {
+		t.Fatalf("continuation did not terminate: %+v", requests)
+	}
+	if combined.String() != want {
+		t.Fatalf("reconstructed content=%q want=%q", combined.String(), want)
 	}
 }
 

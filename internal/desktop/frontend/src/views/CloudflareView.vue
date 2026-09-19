@@ -239,6 +239,10 @@ onUnmounted(() => {
           <input v-model="config.sync_oauth_server_url" type="checkbox" />
           公网 Origin 自动联动 OAuth server_url
         </label>
+        <label class="checkbox" style="margin-bottom: 7px">
+          <input v-model="config.auto_recover" type="checkbox" />
+          自动健康检查并故障恢复
+        </label>
       </div>
 
       <template v-if="config.mode === 'named'">
@@ -269,6 +273,10 @@ onUnmounted(() => {
       <p class="hint">
         公网启动前会拒绝 <code>auth.mode=open</code>，并自动启用 MCPX 的反向代理 Host 处理；开启联动时还会同步
         <code>auth.oauth.server_url</code>，必要时自动重启 MCPX 服务使配置立即生效。
+      </p>
+      <p class="hint">
+        开启自动恢复后，Desktop 每 30 秒运行一次健康检查；连续 2 次出现本地 MCP、Tunnel、公网 MCP 或 5xx/网络类 OAuth metadata
+        异常时，会自动重启本地 MCPX 与 Cloudflare Tunnel，并设置 2 分钟恢复冷却。手动停止 Tunnel 会解除自动恢复，重新启动后再次生效。
       </p>
     </div>
 
