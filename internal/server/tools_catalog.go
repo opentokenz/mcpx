@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -164,59 +165,60 @@ type actionSchemaBranch struct {
 	Required    []string
 }
 
-// cleanActionTool is the strict action schema used by the final core catalog.
-// Every branch repeats common properties so remote models can validate the
-// selected action without relying on permissive root-level fallbacks.
+// cleanActionTool is the strict flat action schema used by the final core catalog.
+// Action descriptions summarize each action's purpose and conditional required fields.
 func cleanActionTool(name, description string, common map[string]any, branches map[string]actionSchemaBranch, annotation toolAnnotation) mcp.Tool {
 	actions := make([]string, 0, len(branches))
 	for action := range branches {
 		actions = append(actions, action)
 	}
 	sort.Strings(actions)
-	rootProperties := map[string]any{"action": map[string]any{"type": "string", "enum": actions}}
+
+	actionDescriptions := make([]string, 0, len(actions))
+	rootProperties := make(map[string]any, len(common)+len(branches)+1)
 	for key, value := range common {
 		rootProperties[key] = value
 	}
-	oneOf := make([]map[string]any, 0, len(actions))
+
 	for _, action := range actions {
 		branch := branches[action]
 		if branch.Description == "" {
 			branch.Description = "仅执行「" + action + "」操作；失败时按返回的 next_action 继续。"
 		}
-		// JSON Schema evaluates additionalProperties against the object schema
-		// where it is declared. Keep every branch field in the root property set
-		// as well as in the selected branch; otherwise strict client validators
-		// reject valid branch arguments before oneOf is evaluated.
 		for key, value := range branch.Properties {
 			if _, exists := rootProperties[key]; !exists {
 				rootProperties[key] = value
 			}
 		}
-		properties := map[string]any{"action": map[string]any{"const": action}}
-		for key, value := range common {
-			properties[key] = value
+
+		var reqFields []string
+		for _, field := range withoutBoundSessionRequirement(branch.Required) {
+			if field != "action" {
+				reqFields = append(reqFields, field)
+			}
 		}
-		for key, value := range branch.Properties {
-			properties[key] = value
+
+		desc := action + "：" + branch.Description
+		if len(reqFields) > 0 {
+			if !strings.HasSuffix(desc, "。") && !strings.HasSuffix(desc, "；") {
+				desc += "；"
+			}
+			desc += "必填 " + strings.Join(reqFields, "、") + "。"
 		}
-		required := withoutBoundSessionRequirement(branch.Required)
-		required = append([]string{"action"}, required...)
-		oneOf = append(oneOf, map[string]any{
-			"type":                 "object",
-			"description":          branch.Description,
-			"properties":           properties,
-			"required":             required,
-			"additionalProperties": false,
-		})
+		actionDescriptions = append(actionDescriptions, desc)
 	}
-	// Keep the root object open for clients that validate object properties
-	// before evaluating oneOf. Each selected branch remains strict and carries
-	// the common fields plus its own fields, so the action contract is still
-	// enforced by validators that implement oneOf correctly. An open root is
-	// required for connectors that flatten or pre-validate discriminated unions.
+
+	rootProperties["action"] = map[string]any{
+		"type":        "string",
+		"enum":        actions,
+		"description": strings.Join(actionDescriptions, "\n"),
+	}
+
 	raw, _ := json.Marshal(map[string]any{
-		"type": "object", "properties": rootProperties,
-		"required": []string{"action"}, "oneOf": oneOf,
+		"type":                 "object",
+		"properties":           rootProperties,
+		"required":             []string{"action"},
+		"additionalProperties": false,
 	})
 	return annotatedTool(mcp.Tool{Name: name, Description: description, InputSchema: json.RawMessage(raw)}, annotation)
 }
@@ -265,71 +267,12 @@ func withEmbeddedActivitySchema(tool mcp.Tool) mcp.Tool {
 		if rootProperties != nil {
 			rootProperties["activity"] = activityInputSchema()
 		}
-		if branches, ok := schema["oneOf"].([]any); ok {
-			for _, raw := range branches {
-				branch, _ := raw.(map[string]any)
-				properties, _ := branch["properties"].(map[string]any)
-				if properties != nil {
-					// Root validation owns the full optional Activity contract. Keep only
-					// an object placeholder in action branches so clients that project a
-					// oneOf branch still accept Activity without repeating its six fields.
-					properties["activity"] = map[string]any{"type": "object"}
-				}
-			}
-		}
 	}
-	deduplicateBranchDescriptions(schema)
 	raw, err := json.Marshal(schema)
 	if err == nil {
 		tool.InputSchema = json.RawMessage(raw)
 	}
 	return tool
-}
-
-func deduplicateBranchDescriptions(schema map[string]any) {
-	rootProperties, _ := schema["properties"].(map[string]any)
-	branches, _ := schema["oneOf"].([]any)
-	for _, raw := range branches {
-		branch, _ := raw.(map[string]any)
-		properties, _ := branch["properties"].(map[string]any)
-		for key, branchProperty := range properties {
-			rootProperty, ok := rootProperties[key]
-			if !ok {
-				continue
-			}
-			removeMatchingDescriptions(branchProperty, rootProperty)
-		}
-	}
-}
-
-func removeMatchingDescriptions(branch, root any) {
-	switch branchValue := branch.(type) {
-	case map[string]any:
-		rootValue, ok := root.(map[string]any)
-		if !ok {
-			return
-		}
-		if branchDescription, ok := branchValue["description"].(string); ok {
-			if rootDescription, ok := rootValue["description"].(string); ok && branchDescription == rootDescription {
-				delete(branchValue, "description")
-			}
-		}
-		for key, child := range branchValue {
-			if rootChild, ok := rootValue[key]; ok {
-				removeMatchingDescriptions(child, rootChild)
-			}
-		}
-	case []any:
-		rootValue, ok := root.([]any)
-		if !ok {
-			return
-		}
-		for index, child := range branchValue {
-			if index < len(rootValue) {
-				removeMatchingDescriptions(child, rootValue[index])
-			}
-		}
-	}
 }
 
 func stringSchema(description string) map[string]any {
@@ -388,49 +331,10 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 	operationManage := supportTool("operation_manage", toolDesc["operation_manage"], map[string]any{
 		"remote_session_id": remoteSession,
 		"operation_id":      stringSchema("单个异步操作 ID；与 operation_ids 二选一"), "operation_ids": operationIDsSchema,
-		"action":  enumSchema("操作动作；operation_ids 批量模式只支持 status、result", "status", "wait", "result", "cancel", "resume"),
+		"action":  enumSchema("操作动作；单操作必填 operation_id，支持 status、wait、result、cancel、resume；批量查询必填 operation_ids，仅支持 status、result；二者互斥。", "status", "wait", "result", "cancel", "resume"),
 		"step_id": stringSchema("批量操作子步骤 ID"), "timeout_ms": numberSchema("wait 最长等待毫秒数"),
 		"confirmation_token": stringSchema("仅表示用户已确认同一子操作，不是认证凭据"), "cursor": stringSchema("结果分页游标"), "limit": numberSchema("结果字节或列表数量限制"),
 	}, []string{"remote_session_id", "action"}, sessionToolAnnotation)
-	var operationManageSchema map[string]any
-	_ = json.Unmarshal(mcpresult.ToolSchemaJSON(operationManage), &operationManageSchema)
-	// 客户端可能直接把 oneOf 投影为参数联合类型，不合并外层 properties。
-	// 每个分支都必须独立描述实际调用所需的完整身份和参数。
-	operationBranchProperties := func(batch bool) map[string]any {
-		properties := make(map[string]any)
-		for key, value := range operationManageSchema["properties"].(map[string]any) {
-			properties[key] = value
-		}
-		if batch {
-			delete(properties, "operation_id")
-			delete(properties, "step_id")
-			delete(properties, "cursor")
-			delete(properties, "confirmation_token")
-			delete(properties, "timeout_ms")
-			properties["action"] = enumSchema("批量查询动作", "status", "result")
-		} else {
-			delete(properties, "operation_ids")
-		}
-		return properties
-	}
-	operationManageSchema["oneOf"] = []any{
-		map[string]any{
-			"type":                 "object",
-			"description":          "单操作模式；支持 status、wait、result、cancel、resume。",
-			"properties":           operationBranchProperties(false),
-			"required":             []string{"action", "operation_id"},
-			"additionalProperties": false,
-		},
-		map[string]any{
-			"type":                 "object",
-			"description":          "批量查询模式；仅支持 status、result，直接传 operation_ids。",
-			"properties":           operationBranchProperties(true),
-			"required":             []string{"action", "operation_ids"},
-			"additionalProperties": false,
-		},
-	}
-	operationManageSchema["required"] = []string{"action"}
-	operationManage.InputSchema = mustSchemaJSON(operationManageSchema)
 	r.addTool(s, operationManage, r.toolOperationManage)
 
 	r.addTool(s, supportTool("runtime_read", toolDesc["runtime_read"], map[string]any{
@@ -502,11 +406,18 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 	}
 	r.addTool(s, cleanActionTool("plan", toolDesc["plan"], planCommon, planBranches, planToolAnnotation), r.toolPlanClean)
 
-	artifactCommon := map[string]any{"remote_session_id": remoteSession, "purpose": stringSchema("本次产物操作的用户目标"), "idempotency_key": stringSchema("同一登记操作重试时复用的幂等键"), "execution_mode": enumSchema("执行模式", "sync", "async")}
+	artifactCommon := map[string]any{
+		"remote_session_id": remoteSession,
+		"purpose":           stringSchema("本次产物操作的用户目标"),
+		"idempotency_key":   stringSchema("同一登记操作重试时复用的幂等键"),
+		"execution_mode":    enumSchema("执行模式", "sync", "async"),
+		"kind":              enumSchema("产物类型；register 时指定产物类型，list 时按类型过滤", "test_report", "coverage", "build", "screenshot", "log", "other"),
+		"limit":             numberSchema("数量或字节限制；list 时为返回数量，read 时为字节数量"),
+	}
 	artifactBranches := map[string]actionSchemaBranch{
-		"register": {Properties: map[string]any{"path": path, "name": stringSchema("显示名称"), "kind": enumSchema("产物类型", "test_report", "coverage", "build", "screenshot", "log", "other"), "mime_type": stringSchema("MIME 类型")}, Required: []string{"remote_session_id", "purpose", "path"}},
-		"list":     {Properties: map[string]any{"kind": stringSchema("按产物类型过滤"), "limit": numberSchema("返回数量")}, Required: []string{"remote_session_id"}},
-		"read":     {Properties: map[string]any{"artifact_id": stringSchema("服务端返回的 Artifact ID"), "offset": numberSchema("字节偏移"), "limit": numberSchema("字节数量")}, Required: []string{"remote_session_id", "artifact_id"}},
+		"register": {Properties: map[string]any{"path": path, "name": stringSchema("显示名称"), "mime_type": stringSchema("MIME 类型")}, Required: []string{"remote_session_id", "purpose", "path"}},
+		"list":     {Properties: map[string]any{}, Required: []string{"remote_session_id"}},
+		"read":     {Properties: map[string]any{"artifact_id": stringSchema("服务端返回的 Artifact ID"), "offset": numberSchema("字节偏移")}, Required: []string{"remote_session_id", "artifact_id"}},
 	}
 	r.addTool(s, cleanActionTool("artifact", toolDesc["artifact"], artifactCommon, artifactBranches, artifactToolAnnotation), r.toolArtifactClean)
 

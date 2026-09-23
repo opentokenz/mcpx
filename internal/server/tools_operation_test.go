@@ -1,8 +1,6 @@
 package server
 
 import (
-	"mcpx/internal/mcpresult"
-
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"mcpx/internal/envelope"
+	"mcpx/internal/mcpresult"
 	"mcpx/internal/operation"
 	"mcpx/internal/remotesession"
 )
@@ -560,5 +561,38 @@ func TestValidateOperationSchemaValueHandlesUntypedSchemas(t *testing.T) {
 		"required": []any{"name"},
 	}, "arguments"); err != nil {
 		t.Fatalf("object constraints should be inferred when type is omitted: %v", err)
+	}
+}
+
+func TestValidateOperationSchemaValueFlatToolPreflight(t *testing.T) {
+	runtime := &Runtime{}
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	runtime.registerTools(protocol)
+
+	executeTool := runtime.listedToolMap()["execute"]
+	var executeSchema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(executeTool), &executeSchema); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Missing conditional required field (e.g. command/argv for run) passes schema preflight
+	// because schema required is only ["action"]. Handler will enforce at execution.
+	if err := validateOperationSchemaValue(map[string]any{"action": "run"}, executeSchema, "arguments"); err != nil {
+		t.Fatalf("missing conditional required fields should pass schema preflight: %v", err)
+	}
+
+	// 2. Unknown field is rejected due to additionalProperties: false
+	if err := validateOperationSchemaValue(map[string]any{"action": "run", "unknown_bogus_field": "val"}, executeSchema, "arguments"); err == nil {
+		t.Fatal("unknown field must be rejected by additionalProperties: false")
+	}
+
+	// 3. Field from another action in root properties is permitted at schema preflight
+	if err := validateOperationSchemaValue(map[string]any{"action": "run", "execution_task_id": "task_1"}, executeSchema, "arguments"); err != nil {
+		t.Fatalf("root properties from other actions are accepted at schema preflight: %v", err)
+	}
+
+	// 4. Missing root required field "action" is rejected
+	if err := validateOperationSchemaValue(map[string]any{"command": "ls"}, executeSchema, "arguments"); err == nil {
+		t.Fatal("missing root required 'action' must be rejected")
 	}
 }

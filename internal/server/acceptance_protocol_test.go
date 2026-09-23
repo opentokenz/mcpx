@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -241,12 +242,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		}
 		rawOutputSchema, hasOutputSchema := listedTool["outputSchema"]
 		if name == "mcp_tool" {
-			outputSchema, ok := rawOutputSchema.(map[string]any)
-			if !hasOutputSchema || !ok || outputSchema["$id"] != "mcpx.mcp_tool_result.v1" {
-				t.Fatalf("mcp_tool must expose its permissive passthrough OutputSchema: %+v", rawOutputSchema)
-			}
-			if _, fixedType := outputSchema["type"]; fixedType {
-				t.Fatalf("mcp_tool passthrough OutputSchema must not constrain upstream structuredContent to one JSON type: %+v", rawOutputSchema)
+			if hasOutputSchema && rawOutputSchema != nil {
+				t.Fatalf("mcp_tool must omit outputSchema: %+v", rawOutputSchema)
 			}
 		} else {
 			outputSchema, ok := rawOutputSchema.(map[string]any)
@@ -300,51 +297,32 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			t.Fatalf("move_out schema missing %q: %s", needle, moveSchema)
 		}
 	}
-	branches, _ := moveSchemaMap["oneOf"].([]any)
-	if len(branches) != 2 {
-		t.Fatalf("move_out must expose exactly prepare/submit branches: %s", moveSchema)
+	if _, hasOneOf := moveSchemaMap["oneOf"]; hasOneOf {
+		t.Fatalf("move_out must not rely on oneOf: %s", moveSchema)
 	}
-	var prepareProperties, submitProperties map[string]any
-	var prepareRequired, submitRequired []any
-	for _, raw := range branches {
-		branch := raw.(map[string]any)
-		properties := branch["properties"].(map[string]any)
-		actionSchema := properties["action"].(map[string]any)
-		action, _ := actionSchema["const"].(string)
-		if action == "" {
-			t.Fatalf("move_out action branch is not discriminated: %+v", branch)
-		}
-		switch action {
-		case "prepare":
-			prepareProperties = properties
-			prepareRequired, _ = branch["required"].([]any)
-		case "submit":
-			submitProperties = properties
-			submitRequired, _ = branch["required"].([]any)
+	moveProperties, _ := moveSchemaMap["properties"].(map[string]any)
+	for _, field := range []string{"action", "purpose", "targets", "confirmation_uuid", "remote_session_id", "idempotency_key"} {
+		if moveProperties[field] == nil {
+			t.Fatalf("move_out schema missing property %q: %s", field, moveSchema)
 		}
 	}
-	for _, field := range []string{"action", "purpose", "targets"} {
-		if prepareProperties[field] == nil || !containsSchemaRequired(prepareRequired, field) {
-			t.Fatalf("move_out prepare branch missing required %q: %s", field, moveSchema)
+	if moveProperties["workspace"] != nil || strings.Contains(string(moveSchema), `"kind"`) {
+		t.Fatalf("move_out must let Runtime infer workspace/kind: %s", moveSchema)
+	}
+	actionProp, _ := moveProperties["action"].(map[string]any)
+	actionDesc, _ := actionProp["description"].(string)
+	for _, needle := range []string{"prepare", "submit", "purpose", "targets", "confirmation_uuid"} {
+		if !strings.Contains(actionDesc, needle) {
+			t.Fatalf("move_out action.description missing %q: %s", needle, actionDesc)
 		}
 	}
-	if prepareProperties["remote_session_id"] == nil || containsSchemaRequired(prepareRequired, "remote_session_id") {
-		t.Fatalf("move_out prepare must keep optional remote_session_id override: %s", moveSchema)
+	moveRequired, _ := moveSchemaMap["required"].([]any)
+	if !reflect.DeepEqual(moveRequired, []any{"action"}) {
+		t.Fatalf("move_out required must be exactly [action], got %v", moveRequired)
 	}
-	if prepareProperties["workspace"] != nil || containsSchemaRequired(prepareRequired, "idempotency_key") || strings.Contains(string(moveSchema), `"kind"`) {
-		t.Fatalf("move_out prepare must let Runtime infer workspace/kind and make idempotency optional: %s", moveSchema)
-	}
-	for _, field := range []string{"action", "confirmation_uuid"} {
-		if submitProperties[field] == nil || !containsSchemaRequired(submitRequired, field) {
-			t.Fatalf("move_out submit branch missing required %q: %s", field, moveSchema)
-		}
-	}
-	if submitProperties["remote_session_id"] == nil || containsSchemaRequired(submitRequired, "remote_session_id") {
-		t.Fatalf("move_out submit must keep optional remote_session_id override: %s", moveSchema)
-	}
-	for _, forbidden := range []string{"workspace", "purpose", "targets", "move_request_id", "manifest_sha256", "idempotency_key"} {
-		if submitProperties[forbidden] != nil {
-			t.Fatalf("move_out submit must bind %q server-side: %s", forbidden, moveSchema)
+	for _, forbidden := range []string{"workspace", "move_request_id", "manifest_sha256"} {
+		if moveProperties[forbidden] != nil {
+			t.Fatalf("move_out must bind %q server-side: %s", forbidden, moveSchema)
 		}
 	}
 	commandSchema, _ := json.Marshal(byName["execute"].InputSchema)

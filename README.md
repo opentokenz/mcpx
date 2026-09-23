@@ -672,9 +672,11 @@ operation_manage(action="result", operation_id="op_...")
 工具默认文本适合模型和宿主直接展示；机器结果同时保存在
 `structuredContent` 和 ARC 元数据 `_meta["mcpx.result"]`。响应状态包括：
 
-`tools/list` 同时为 MCPX 工具公布 `outputSchema`，其描述的是实际返回的
+`tools/list` 为除 `mcp_tool` 外的 MCPX 工具公布 `outputSchema`，其描述的是实际返回的
 `structuredContent` 公共结构（`status`、`type`、`context`、`data`、`error`、`hints`、`actions`），
 并对有硬上限的工具通过 `x-mcpx-limits` 发布与 `runtime_read(view="capabilities").limits` 同源的限制。
+`mcp_tool` 的 `call` 动作是上游工具的透明转发代理，其 `structuredContent` 忠实返回上游结果（可能是数组、对象或基础类型），
+因此不声明单一对象的 `outputSchema`，避免客户端校验拒绝合法的上游非对象输出。
 `runtime_read(view="capabilities")` 的 `runtime` 同时给出 `version`、`build_commit`、`build_time`、
 `tool_schema_revision` 和 capability 版本信息；旧的顶层 revision alias 不再返回。正式 release/CI
 构建由 linker flags 注入真实 `build_commit` 与 `build_time`；普通 VCS 构建至少回填 revision/dirty 状态。

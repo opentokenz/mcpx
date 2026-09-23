@@ -22,9 +22,12 @@ import (
 func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler) {
 	tool = withEmbeddedActivitySchema(tool)
 	// OutputSchema describes structuredContent, not the larger ARC metadata
-	// envelope. mcp_tool uses a permissive schema because its call action
-	// forwards arbitrary upstream structuredContent unchanged.
-	tool.OutputSchema = outputSchemaForTool(tool.Name)
+	// envelope.
+	if output := outputSchemaForTool(tool.Name); len(output) > 0 {
+		tool.OutputSchema = output
+	} else {
+		tool.OutputSchema = nil
+	}
 	instrumented := r.instrumentTool(tool.Name, handler)
 	if r.toolHandlers == nil {
 		r.toolHandlers = map[string]mcp.ToolHandler{}
@@ -54,21 +57,10 @@ func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler)
 }
 
 func outputSchemaForTool(toolName string) json.RawMessage {
-	limits, hasLimits := publishedLimits()[toolName]
 	if toolName == "mcp_tool" {
-		// list/describe still return MCPX's ARC object, while call is a payload-
-		// transparent proxy and therefore may return any JSON value allowed by
-		// the selected upstream tool's structuredContent contract.
-		schema := map[string]any{
-			"$id":         "mcpx.mcp_tool_result.v1",
-			"description": "mcp_tool list/describe return MCPX metadata; call forwards upstream structuredContent unchanged and may return any JSON value",
-		}
-		if hasLimits {
-			schema["x-mcpx-limits"] = limits
-		}
-		encoded, _ := json.Marshal(schema)
-		return json.RawMessage(encoded)
+		return nil
 	}
+	limits, hasLimits := publishedLimits()[toolName]
 	base := arc.OutputSchema()
 	if !hasLimits {
 		return base

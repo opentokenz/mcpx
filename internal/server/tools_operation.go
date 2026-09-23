@@ -691,15 +691,6 @@ func parseStringSliceValue(value any) ([]string, error) {
 }
 
 func validateOperationSchemaValue(value any, schema map[string]any, path string) error {
-	if branches, ok := schema["oneOf"].([]any); ok && len(branches) > 0 {
-		for _, raw := range branches {
-			branch, ok := raw.(map[string]any)
-			if ok && validateOperationSchemaValue(value, branch, path) == nil {
-				return nil
-			}
-		}
-		return fmt.Errorf("%s does not match any supported schema branch", path)
-	}
 	if enum, ok := schema["enum"].([]any); ok && len(enum) > 0 {
 		matched := false
 		for _, item := range enum {

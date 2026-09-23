@@ -69,13 +69,12 @@ func TestMoveOutSimplifiedSchemaKeepsFileRevisionGuard(t *testing.T) {
 	if err := json.Unmarshal(encoded, &schema); err != nil {
 		t.Fatal(err)
 	}
-	branch := schemaActionBranch(schema, "prepare")
-	if branch == nil {
-		t.Fatalf("prepare branch missing: %s", encoded)
+	if _, hasOneOf := schema["oneOf"]; hasOneOf {
+		t.Fatalf("move_out must not rely on oneOf: %s", encoded)
 	}
-	properties := branch["properties"].(map[string]any)
-	if properties["workspace"] != nil || schemaRequires(branch, "idempotency_key") {
-		t.Fatalf("prepare still exposes duplicate workspace or requires idempotency key: %s", encoded)
+	properties := schema["properties"].(map[string]any)
+	if properties["workspace"] != nil || schemaRequires(schema, "idempotency_key") {
+		t.Fatalf("move_out still exposes duplicate workspace or requires idempotency key: %s", encoded)
 	}
 	targetItems := properties["targets"].(map[string]any)["items"].(map[string]any)
 	targetProperties := targetItems["properties"].(map[string]any)

@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -65,14 +66,17 @@ func assertSuggestedActionFitsPublicSchema(t *testing.T, rt *Runtime, action map
 		}
 	}
 	required := requiredFields(schema)
-	if actionName, _ := arguments["action"].(string); actionName != "" {
-		if branch := schemaActionBranch(schema, actionName); branch != nil {
-			required = requiredFields(branch)
-		}
-	}
 	for _, key := range required {
 		if value, exists := arguments[key]; !exists || value == nil || fmt.Sprint(value) == "" {
 			t.Fatalf("suggested %s missing required %q: args=%+v", toolName, key, arguments)
+		}
+	}
+	if actionName, _ := arguments["action"].(string); actionName != "" {
+		if actionProp, ok := properties["action"].(map[string]any); ok {
+			actionDesc, _ := actionProp["description"].(string)
+			if !strings.Contains(actionDesc, actionName) {
+				t.Fatalf("suggested %s action %q is not described in action.description: %s", toolName, actionName, actionDesc)
+			}
 		}
 	}
 }
@@ -86,19 +90,6 @@ func requiredFields(schema map[string]any) []string {
 		}
 	}
 	return result
-}
-
-func schemaActionBranch(schema map[string]any, action string) map[string]any {
-	branches, _ := schema["oneOf"].([]any)
-	for _, raw := range branches {
-		branch, _ := raw.(map[string]any)
-		properties, _ := branch["properties"].(map[string]any)
-		actionSchema, _ := properties["action"].(map[string]any)
-		if actionSchema["const"] == action {
-			return branch
-		}
-	}
-	return nil
 }
 
 var _ mcp.Tool

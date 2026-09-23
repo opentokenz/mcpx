@@ -79,26 +79,27 @@ func TestEffectfulToolsOwnPurposeContract(t *testing.T) {
 	}
 	for _, name := range []string{"skill_tool", "mcp_tool"} {
 		schema := decodedToolSchema(t, registered[name])
-		if branch := actionBranch(schema, "call"); branch == nil || !schemaRequires(branch, "purpose") {
-			t.Fatalf("%s(call) must require purpose: %+v", name, schema)
-		}
-		for _, action := range []string{"list", "describe"} {
-			if branch := actionBranch(schema, action); branch == nil || schemaRequires(branch, "purpose") {
-				t.Fatalf("%s(%s) must remain read-only and not require purpose: %+v", name, action, schema)
-			}
+		properties, _ := schema["properties"].(map[string]any)
+		actionProp, _ := properties["action"].(map[string]any)
+		actionDesc, _ := actionProp["description"].(string)
+		if !strings.Contains(actionDesc, "call") || !strings.Contains(actionDesc, "purpose") {
+			t.Fatalf("%s action.description must document purpose for call: %s", name, actionDesc)
 		}
 	}
 
 	execute := decodedToolSchema(t, registered["execute"])
-	if branch := actionBranch(execute, "run"); branch == nil || !schemaRequires(branch, "purpose") {
-		t.Fatalf("execute(run) must require purpose: %+v", execute)
+	execProps, _ := execute["properties"].(map[string]any)
+	execAction, _ := execProps["action"].(map[string]any)
+	execDesc, _ := execAction["description"].(string)
+	if !strings.Contains(execDesc, "run") || !strings.Contains(execDesc, "purpose") {
+		t.Fatalf("execute action.description must document purpose for run: %s", execDesc)
 	}
 	moveOut := decodedToolSchema(t, registered["move_out"])
-	if branch := actionBranch(moveOut, "prepare"); branch == nil || !schemaRequires(branch, "purpose") {
-		t.Fatalf("move_out(prepare) must require purpose: %+v", moveOut)
-	}
-	if branch := actionBranch(moveOut, "submit"); branch == nil || schemaRequires(branch, "purpose") {
-		t.Fatalf("move_out(submit) must use frozen server purpose, not client purpose: %+v", moveOut)
+	moveProps, _ := moveOut["properties"].(map[string]any)
+	moveAction, _ := moveProps["action"].(map[string]any)
+	moveDesc, _ := moveAction["description"].(string)
+	if !strings.Contains(moveDesc, "prepare") || !strings.Contains(moveDesc, "purpose") {
+		t.Fatalf("move_out action.description must document purpose for prepare: %s", moveDesc)
 	}
 }
 
@@ -143,13 +144,6 @@ func assertNoSchemaFields(t *testing.T, toolName string, schema map[string]any, 
 			}
 		}
 	}
-	branches, _ := schema["oneOf"].([]any)
-	for _, raw := range branches {
-		branch, _ := raw.(map[string]any)
-		if branch != nil {
-			assertNoSchemaFields(t, toolName, branch, forbidden)
-		}
-	}
 }
 
 func schemaRequires(schema map[string]any, field string) bool {
@@ -160,17 +154,4 @@ func schemaRequires(schema map[string]any, field string) bool {
 		}
 	}
 	return false
-}
-
-func actionBranch(schema map[string]any, action string) map[string]any {
-	branches, _ := schema["oneOf"].([]any)
-	for _, raw := range branches {
-		branch, _ := raw.(map[string]any)
-		properties, _ := branch["properties"].(map[string]any)
-		actionSchema, _ := properties["action"].(map[string]any)
-		if actionSchema["const"] == action {
-			return branch
-		}
-	}
-	return nil
 }

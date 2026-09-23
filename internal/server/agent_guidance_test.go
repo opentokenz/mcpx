@@ -83,15 +83,22 @@ func TestEveryPublicToolHasModelFacingDescriptionAndActionBranches(t *testing.T)
 		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
 			t.Fatalf("tool %s schema: %v", name, err)
 		}
-		branches, ok := schema["oneOf"].([]any)
-		if !ok {
-			continue
+		if _, hasOneOf := schema["oneOf"]; hasOneOf {
+			t.Fatalf("tool %s must not rely on top-level oneOf: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
-		for index, branch := range branches {
-			item, ok := branch.(map[string]any)
-			description, descriptionOK := item["description"].(string)
-			if !ok || !descriptionOK || strings.TrimSpace(description) == "" {
-				t.Fatalf("tool %s branch %d has no description: %+v", name, index, branch)
+		if _, hasAnyOf := schema["anyOf"]; hasAnyOf {
+			t.Fatalf("tool %s must not rely on top-level anyOf: %s", name, mcpresult.ToolSchemaJSON(registered))
+		}
+		if _, hasAllOf := schema["allOf"]; hasAllOf {
+			t.Fatalf("tool %s must not rely on top-level allOf: %s", name, mcpresult.ToolSchemaJSON(registered))
+		}
+		properties, _ := schema["properties"].(map[string]any)
+		if actionProp, ok := properties["action"].(map[string]any); ok {
+			if _, hasEnum := actionProp["enum"].([]any); hasEnum {
+				desc, _ := actionProp["description"].(string)
+				if strings.TrimSpace(desc) == "" {
+					t.Fatalf("tool %s action has enum but missing action.description", name)
+				}
 			}
 		}
 	}

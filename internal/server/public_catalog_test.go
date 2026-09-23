@@ -134,7 +134,11 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	}
 
 	for name, registered := range runtime.listedToolMap() {
-		if registered.OutputSchema == nil {
+		if name == "mcp_tool" {
+			if registered.OutputSchema != nil {
+				t.Fatalf("mcp_tool must omit OutputSchema: %+v", registered.OutputSchema)
+			}
+		} else if registered.OutputSchema == nil {
 			t.Fatalf("%s must expose the ARC structuredContent output schema", name)
 		}
 		if _, limited := publishedLimits()[name]; limited {
@@ -150,10 +154,16 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 			t.Fatalf("%s schema: %v", name, err)
 		}
 		assertRequiredKeywordsAreArrays(t, name, "$", schema)
-		if _, union := schema["oneOf"]; union && schema["additionalProperties"] == nil {
-			// Discriminated action roots stay open for connectors that inspect
-			// object properties before evaluating oneOf.
-		} else if schema["additionalProperties"] != false {
+		if _, union := schema["oneOf"]; union {
+			t.Fatalf("%s must not rely on top-level oneOf: %s", name, mcpresult.ToolSchemaJSON(registered))
+		}
+		if _, anyOf := schema["anyOf"]; anyOf {
+			t.Fatalf("%s must not rely on top-level anyOf: %s", name, mcpresult.ToolSchemaJSON(registered))
+		}
+		if _, allOf := schema["allOf"]; allOf {
+			t.Fatalf("%s must not rely on top-level allOf: %s", name, mcpresult.ToolSchemaJSON(registered))
+		}
+		if schema["additionalProperties"] != false {
 			t.Fatalf("%s must reject unknown arguments: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
 		properties, _ := schema["properties"].(map[string]any)
@@ -406,50 +416,28 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 			t.Fatalf("operation_manage must make operation_id conditional: %s", mcpresult.ToolSchemaJSON(operationManage))
 		}
 	}
-	branches, ok := operationSchema["oneOf"].([]any)
-	if !ok || len(branches) != 2 {
-		t.Fatalf("operation_manage oneOf=%T %+v", operationSchema["oneOf"], operationSchema["oneOf"])
+	if _, hasOneOf := operationSchema["oneOf"]; hasOneOf {
+		t.Fatalf("operation_manage must not rely on top-level oneOf: %s", mcpresult.ToolSchemaJSON(operationManage))
 	}
-	var sawSingle, sawBatch bool
-	for _, raw := range branches {
-		branch := raw.(map[string]any)
-		required := branch["required"].([]any)
-		properties := branch["properties"].(map[string]any)
-		action := properties["action"].(map[string]any)
-		if properties["remote_session_id"] == nil || containsSchemaRequired(required, "remote_session_id") {
-			t.Fatal("客户端独立投影 oneOf 分支必须保留 optional remote_session_id 覆盖")
-		}
-		if properties["action"] == nil || !containsSchemaRequired(required, "action") {
-			t.Fatal("客户端独立投影 oneOf 分支必须保留必需参数 action")
-		}
-		switch {
-		case containsSchemaRequired(required, "operation_id"):
-			sawSingle = true
-			for _, key := range []string{"operation_id", "timeout_ms", "step_id", "cursor", "confirmation_token"} {
-				if properties[key] == nil {
-					t.Fatalf("单操作分支缺少可调用参数 %s", key)
-				}
-			}
-			if properties["operation_ids"] != nil {
-				t.Fatal("单操作分支暴露了互斥批量身份")
-			}
-		case containsSchemaRequired(required, "operation_ids"):
-			sawBatch = true
-			if properties["operation_ids"] == nil || properties["operation_id"] != nil {
-				t.Fatal("批量分支身份不完整或不互斥")
-			}
-			enum, _ := action["enum"].([]any)
-			if !reflect.DeepEqual(enum, []any{"status", "result"}) && !reflect.DeepEqual(enum, []any{"result", "status"}) {
-				t.Fatalf("batch actions=%v", enum)
-			}
+	for _, key := range []string{"action", "operation_id", "operation_ids", "step_id", "timeout_ms", "confirmation_token", "cursor", "limit"} {
+		if operationProperties[key] == nil {
+			t.Fatalf("operation_manage missing property %q", key)
 		}
 	}
-	if !sawSingle || !sawBatch {
-		t.Fatalf("operation_manage schema branches missing single=%v batch=%v: %s", sawSingle, sawBatch, mcpresult.ToolSchemaJSON(operationManage))
+	actionProp, _ := operationProperties["action"].(map[string]any)
+	actionDesc, _ := actionProp["description"].(string)
+	for _, needle := range []string{"operation_id", "operation_ids", "status", "result"} {
+		if !strings.Contains(actionDesc, needle) {
+			t.Fatalf("operation_manage action.description missing %q: %s", needle, actionDesc)
+		}
+	}
+	opRequired, _ := operationSchema["required"].([]any)
+	if !reflect.DeepEqual(opRequired, []any{"action"}) {
+		t.Fatalf("operation_manage required must be exactly [action], got %v", opRequired)
 	}
 }
 
-func TestOneOfBranchDescriptionsAreNotRepeatedFromRoot(t *testing.T) {
+func TestActionSchemasAreFlatAndCarryActionDescription(t *testing.T) {
 	runtime := &Runtime{}
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
@@ -459,24 +447,57 @@ func TestOneOfBranchDescriptionsAreNotRepeatedFromRoot(t *testing.T) {
 		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
 			t.Fatalf("%s schema: %v", name, err)
 		}
-		rootProperties, _ := schema["properties"].(map[string]any)
-		branches, _ := schema["oneOf"].([]any)
-		for branchIndex, rawBranch := range branches {
-			branch, _ := rawBranch.(map[string]any)
-			if strings.TrimSpace(fmt.Sprint(branch["description"])) == "" {
-				t.Fatalf("%s branch %d lost branch purpose description", name, branchIndex)
-			}
-			branchProperties, _ := branch["properties"].(map[string]any)
-			for field, rawBranchProperty := range branchProperties {
-				rootProperty, _ := rootProperties[field].(map[string]any)
-				branchProperty, _ := rawBranchProperty.(map[string]any)
-				rootDescription, _ := rootProperty["description"].(string)
-				branchDescription, _ := branchProperty["description"].(string)
-				if rootDescription != "" && branchDescription == rootDescription {
-					t.Fatalf("%s branch %d field %q repeats root description %q", name, branchIndex, field, rootDescription)
-				}
+		if _, hasOneOf := schema["oneOf"]; hasOneOf {
+			t.Fatalf("%s must not rely on top-level oneOf", name)
+		}
+		if schema["additionalProperties"] != false {
+			t.Fatalf("%s must have additionalProperties: false", name)
+		}
+		properties, ok := schema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s missing properties", name)
+		}
+		actionSchema, hasAction := properties["action"].(map[string]any)
+		if !hasAction {
+			continue
+		}
+		enums, _ := actionSchema["enum"].([]any)
+		desc, _ := actionSchema["description"].(string)
+		if strings.TrimSpace(desc) == "" {
+			t.Fatalf("%s action has enum %v but missing action.description", name, enums)
+		}
+		for _, enumVal := range enums {
+			actionName := fmt.Sprint(enumVal)
+			if !strings.Contains(desc, actionName) {
+				t.Fatalf("%s action.description missing action %q: %s", name, actionName, desc)
 			}
 		}
+	}
+
+	artifact := runtime.listedToolMap()["artifact"]
+	var artifactSchema map[string]any
+	_ = json.Unmarshal(mcpresult.ToolSchemaJSON(artifact), &artifactSchema)
+	artifactProps, _ := artifactSchema["properties"].(map[string]any)
+	kindProp, _ := artifactProps["kind"].(map[string]any)
+	if kindProp == nil {
+		t.Fatal("artifact missing kind property")
+	}
+	kindEnums, _ := kindProp["enum"].([]any)
+	wantEnums := []any{"test_report", "coverage", "build", "screenshot", "log", "other"}
+	if !reflect.DeepEqual(kindEnums, wantEnums) {
+		t.Fatalf("artifact kind enum = %v, want %v", kindEnums, wantEnums)
+	}
+	kindDesc, _ := kindProp["description"].(string)
+	if !strings.Contains(kindDesc, "register") || !strings.Contains(kindDesc, "list") {
+		t.Fatalf("artifact kind description should cover register and list: %s", kindDesc)
+	}
+	limitProp, _ := artifactProps["limit"].(map[string]any)
+	if limitProp == nil {
+		t.Fatal("artifact missing limit property")
+	}
+	limitDesc, _ := limitProp["description"].(string)
+	if !strings.Contains(limitDesc, "list") || !strings.Contains(limitDesc, "read") {
+		t.Fatalf("artifact limit description should cover list and read: %s", limitDesc)
 	}
 }
 
@@ -505,42 +526,6 @@ func assertRequiredKeywordsAreArrays(t *testing.T, toolName, path string, value 
 	case []any:
 		for index, child := range typed {
 			assertRequiredKeywordsAreArrays(t, toolName, fmt.Sprintf("%s[%d]", path, index), child)
-		}
-	}
-}
-
-func TestActionSchemasExposeBranchPropertiesAtRoot(t *testing.T) {
-	runtime := &Runtime{}
-	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
-	runtime.registerTools(protocol)
-
-	for name, registered := range runtime.listedToolMap() {
-		var schema map[string]any
-		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
-			t.Fatalf("%s schema: %v", name, err)
-		}
-		branches, ok := schema["oneOf"].([]any)
-		if !ok {
-			continue
-		}
-		rootProperties, ok := schema["properties"].(map[string]any)
-		if !ok {
-			t.Fatalf("%s union schema has no root properties", name)
-		}
-		for index, rawBranch := range branches {
-			branch, ok := rawBranch.(map[string]any)
-			if !ok {
-				t.Fatalf("%s branch %d has invalid schema %T", name, index, rawBranch)
-			}
-			branchProperties, ok := branch["properties"].(map[string]any)
-			if !ok {
-				t.Fatalf("%s branch %d has no properties", name, index)
-			}
-			for field := range branchProperties {
-				if _, exists := rootProperties[field]; !exists {
-					t.Fatalf("%s branch %d field %q is rejected by root additionalProperties", name, index, field)
-				}
-			}
 		}
 	}
 }

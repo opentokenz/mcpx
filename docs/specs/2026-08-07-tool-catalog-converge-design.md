@@ -1,7 +1,7 @@
 # MCPX：公开工具收敛、域分包与提示词文件化
 
 - 记录日期：2026-08-07
-- 状态：设计已确认（待实现计划）
+- 状态：设计已确认；2026-09-23 起公开 schema 根上不再使用 `oneOf` 收紧 required，改为扁平 object + `action.description` 说明，详见 `docs/plans/2026-09-23-flatten-tool-input-schema.md`
 - 前置：`2026-08-07-official-go-sdk-human-model-split-design.md`（content / structuredContent 分流已落地）
 - 宿主：能调用 MCP 的 GPT；本地终端观测仅人看
 
