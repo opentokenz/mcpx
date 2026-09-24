@@ -9,6 +9,7 @@ import (
 
 	"mcpx/internal/audit"
 	"mcpx/internal/envelope"
+	"mcpx/internal/remotesession"
 	"mcpx/internal/screenshot"
 )
 
@@ -16,8 +17,14 @@ type screenCapturer interface {
 	Capture(context.Context, screenshot.Request) (screenshot.Result, error)
 }
 
+type screenshotCaptureData struct {
+	screenshot.Metadata
+	ArtifactID  string `json:"artifact_id"`
+	ResourceURI string `json:"resource_uri"`
+}
+
 func (r *Runtime) toolScreenshotCapture(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, _, session, fail := r.changeRequest(ctx, req, true)
+	envReq, principal, session, fail := r.changeRequest(ctx, req, true)
 	if fail != nil {
 		return fail, nil
 	}
@@ -35,16 +42,42 @@ func (r *Runtime) toolScreenshotCapture(ctx context.Context, req *mcp.CallToolRe
 		response.RemoteSessionID = session.ID
 		return r.resultJSON(response)
 	}
-	result, err := r.remoteResult(envReq, session.ID, session.WorkspaceName, captured.Metadata)
+
+	registered, err := r.artifacts.RegisterBytes(
+		ctx,
+		session.ID,
+		principal.ID,
+		captured.Data,
+		"screenshot."+captured.Metadata.Format,
+		"screenshot",
+		captured.Metadata.MIMEType,
+	)
+	if err != nil {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "screenshot_artifact_error", err.Error())
+	}
+	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{
+		RemoteSessionID: session.ID,
+		Type:            "artifact.registered",
+		OperationID:     registered.ID,
+		Summary:         registered.Name,
+		ResourceURI:     registered.ResourceURI,
+	})
+
+	result, err := r.remoteResult(envReq, session.ID, session.WorkspaceName, screenshotCaptureData{
+		Metadata:    captured.Metadata,
+		ArtifactID:  registered.ID,
+		ResourceURI: registered.ResourceURI,
+	})
 	if err != nil {
 		return nil, err
 	}
-	// Image is host-visible content; structured metadata stays in wire SC from remoteResult.
+	// Image is host-visible content; structured data also carries a durable artifact fallback.
 	result.Content = append(result.Content, mcpresult.NewImage(captured.Data, captured.Metadata.MIMEType))
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName, Tool: "screenshot_capture", Status: "ok", Detail: map[string]any{
 		"mode": captured.Metadata.Mode, "display": captured.Metadata.Display,
 		"width": captured.Metadata.OutputWidth, "height": captured.Metadata.OutputHeight,
 		"format": captured.Metadata.Format, "bytes": captured.Metadata.Bytes, "sha256": captured.Metadata.SHA256,
+		"artifact_id": registered.ID, "resource_uri": registered.ResourceURI,
 	}})
 	return result, nil
 }

@@ -105,6 +105,53 @@ func (s *Service) Register(ctx context.Context, remoteSessionID, principalID, wo
 	return artifact, nil
 }
 
+func (s *Service) RegisterBytes(ctx context.Context, remoteSessionID, principalID string, data []byte, name, kind, mimeType string) (Artifact, error) {
+	if name == "" {
+		name = "artifact.bin"
+	}
+	if kind == "" {
+		kind = "other"
+	}
+	if mimeType == "" {
+		mimeType = mime.TypeByExtension(filepath.Ext(name))
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+	}
+	probe := data
+	if len(probe) > 64<<10 {
+		probe = probe[:64<<10]
+	}
+	source := DetectSourceEncoding(name, probe, mimeType)
+	digest := sha256.Sum256(data)
+	id := randomID()
+	now := s.now().UTC()
+	registered := Artifact{
+		ID: id, RemoteSessionID: remoteSessionID, Name: name, Kind: kind, MIMEType: mimeType,
+		SourceEncoding: source.Encoding, SourceBOM: source.BOM, Size: int64(len(data)),
+		SHA256: "sha256:" + hex.EncodeToString(digest[:]), ResourceURI: ResourceURI(remoteSessionID, id), CreatedAt: now,
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Artifact{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts
+        (id, remote_session_id, name, kind, path, mime_type, source_encoding, source_bom, size, sha256, created_by, created_at)
+        VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)`, registered.ID, registered.RemoteSessionID, registered.Name,
+		registered.Kind, registered.MIMEType, registered.SourceEncoding, registered.SourceBOM, registered.Size, registered.SHA256, principalID, now.UnixMilli()); err != nil {
+		return Artifact{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO artifact_blobs (artifact_id, content) VALUES (?, ?)`, registered.ID, data); err != nil {
+		return Artifact{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Artifact{}, err
+	}
+	return registered, nil
+}
+
 func (s *Service) Get(ctx context.Context, remoteSessionID, artifactID string) (Artifact, error) {
 	var artifact Artifact
 	var createdAt int64
@@ -161,6 +208,11 @@ func (s *Service) Read(ctx context.Context, remoteSessionID, artifactID, workspa
 	artifact, err := s.Get(ctx, remoteSessionID, artifactID)
 	if err != nil {
 		return ReadResult{}, err
+	}
+	if content, ok, err := s.managedContent(ctx, artifact.ID); err != nil {
+		return ReadResult{}, err
+	} else if ok {
+		return readArtifactBytes(artifact, content, offset, limit)
 	}
 	absolute, err := file.Resolve(workspaceRoot, artifact.Path)
 	if err != nil {
@@ -220,6 +272,14 @@ func (s *Service) ReadAll(ctx context.Context, remoteSessionID, artifactID, work
 	if artifact.Size > maxBytes {
 		return Artifact{}, nil, fmt.Errorf("artifact exceeds resource limit; use artifact_read")
 	}
+	if content, ok, err := s.managedContent(ctx, artifact.ID); err != nil {
+		return Artifact{}, nil, err
+	} else if ok {
+		if artifactDigest(content) != artifact.SHA256 {
+			return Artifact{}, nil, ErrChanged
+		}
+		return artifact, content, nil
+	}
 	absolute, err := file.Resolve(workspaceRoot, artifact.Path)
 	if err != nil {
 		return Artifact{}, nil, err
@@ -233,6 +293,53 @@ func (s *Service) ReadAll(ctx context.Context, remoteSessionID, artifactID, work
 		return Artifact{}, nil, ErrChanged
 	}
 	return artifact, content, nil
+}
+
+func (s *Service) managedContent(ctx context.Context, artifactID string) ([]byte, bool, error) {
+	var content []byte
+	err := s.db.QueryRowContext(ctx, `SELECT content FROM artifact_blobs WHERE artifact_id = ?`, artifactID).Scan(&content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return content, true, nil
+}
+
+func readArtifactBytes(artifact Artifact, content []byte, offset int64, limit int) (ReadResult, error) {
+	if artifactDigest(content) != artifact.SHA256 {
+		return ReadResult{}, ErrChanged
+	}
+	if limit <= 0 || limit > 1<<20 {
+		limit = 256 << 10
+	}
+	source := SourceEncoding{Encoding: artifact.SourceEncoding, BOM: artifact.SourceBOM}
+	start, end := AlignSourceWindow(offset, limit, artifact.Size, source)
+	buffer := content[start:end]
+	result := ReadResult{
+		Artifact: artifact, SourceEncoding: artifact.SourceEncoding, SourceBOM: artifact.SourceBOM,
+		MIMEType: stripCharset(artifact.MIMEType), SourceOffset: start, NextSourceOffset: end,
+		EOF: end >= artifact.Size, SHA256: artifact.SHA256,
+	}
+	if decoded, ok := DecodeSourceWindow(buffer, start, source); ok {
+		result.DeliveryEncoding = DeliveryEncodingUTF8
+		base := stripCharset(artifact.MIMEType)
+		if !isTextMIME(base) {
+			base = "text/plain"
+		}
+		result.MIMEType = withCharset(base, "utf-8")
+		result.Text = string(decoded)
+		return result, nil
+	}
+	result.DeliveryEncoding = DeliveryEncodingBase64
+	result.Base64 = base64.StdEncoding.EncodeToString(buffer)
+	return result, nil
+}
+
+func artifactDigest(content []byte) string {
+	digest := sha256.Sum256(content)
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func ResourceURI(remoteSessionID, artifactID string) string {

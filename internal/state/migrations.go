@@ -497,6 +497,11 @@ var migrations = []string{
 			state_event_id = 'operation:' || hex(id) || ':' || (state_sequence + 1)
 			WHERE id = NEW.operation_id AND state NOT IN ('succeeded','failed','interrupted','cancelled');
 	END;`,
+	`CREATE TABLE artifact_blobs (
+		artifact_id TEXT PRIMARY KEY,
+		content BLOB NOT NULL,
+		FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
+	);`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

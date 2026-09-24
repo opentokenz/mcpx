@@ -18,7 +18,7 @@ func TestOperationIdentityMigrationPreservesExistingTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 从本候选之前的完整 schema 构造升级对象，不能用新库冒充升级。
-	for i, migration := range migrations[:len(migrations)-1] {
+	for i, migration := range migrations[:len(migrations)-2] {
 		if _, err := db.Exec(migration); err != nil {
 			t.Fatalf("旧 schema %d: %v", i+1, err)
 		}
