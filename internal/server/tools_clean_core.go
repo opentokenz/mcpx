@@ -182,7 +182,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"properties": map[string]any{
 			"path":           path,
 			"operation":      enumSchema("文件操作；用户提出删除、移除或清理时请使用 move_out(action=prepare)，确认后再 move_out(action=submit)", "create", "update", "rename"),
-			"rev":            stringSchema("update/rename 必须；read 返回的 80-bit base64url file revision"),
+			"rev":            stringSchema("update/rename 必须；read 返回的 data.rev（80-bit base64url）。单条 edit 也可写在顶层 rev"),
 			"content":        stringSchema("新文件的完整内容"),
 			"content_base64": stringSchema("完整目标字节的标准 Base64；仅 create/update，须 newline_policy=exact，与 content/replacements/range 互斥"),
 			"newline_policy": enumSchema("preserve 使用现有逻辑文本编辑；exact 原样写入 content_base64 字节，不转换编码/BOM/换行", "preserve", "exact"),
@@ -218,14 +218,13 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 			},
 		},
 		"required": []string{"path", "operation"},
-		"allOf": []map[string]any{{
-			"if":   map[string]any{"properties": map[string]any{"operation": map[string]any{"enum": []string{"update", "rename"}}}},
-			"then": map[string]any{"required": []string{"rev"}},
-		}},
 	}
+	// update/rename 的 rev 是运行时必填约束，不能用 allOf/if-then 表达：
+	// OpenAI 工具 schema 子集不支持组合关键字，条件必填会被丢弃。
 	r.addTool(s, cleanCoreTool("edit", desc["edit"], map[string]any{
 		"remote_session_id": remoteSession,
 		"purpose":           stringSchema("本次文件变更的用户可见目的"),
+		"rev":               stringSchema("单条 update/rename 的快捷字段，等价于 edits[0].rev；取值来自 read 返回的 data.rev。批量编辑必须逐条写在 edits[].rev"),
 		"edits":             arraySchema(editItem, fmt.Sprintf("跨文件批量编辑；总 changed lines 上限为 %d", edit.MaxChangedLines)),
 		"idempotency_key":   stringSchema("同一批次重试时复用的业务幂等键"),
 		"apply":             booleanSchema("是否立即应用；默认 true"),

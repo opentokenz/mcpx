@@ -280,6 +280,8 @@ func (r *Runtime) editToolError(envReq envelope.Request, session remotesession.S
 
 func editRecovery(code string, ae *edit.ApplyError) any {
 	switch code {
+	case "REV_REQUIRED":
+		return "read the file first and pass the returned data.rev as edits[].rev (or the top-level rev for a single edit), then retry"
 	case "STALE_REVISION":
 		return "re-read the file to get the latest rev and retry with a new idempotency_key; the old key remains bound to the stale request"
 	case "MATCH_NOT_FOUND", "MATCH_AMBIGUOUS":
@@ -321,7 +323,7 @@ func editSuggestedNext(code, remoteSessionID string, ae *edit.ApplyError) map[st
 		})
 	}
 	switch code {
-	case "STALE_REVISION":
+	case "REV_REQUIRED", "STALE_REVISION":
 		return refreshWindow("refresh the current file rev before regenerating the edit")
 	case "MATCH_NOT_FOUND", "MATCH_AMBIGUOUS", "RANGE_OUT_OF_BOUNDS":
 		return nextActionWithReason("read", "refresh the current file content before regenerating the update", map[string]any{
@@ -393,12 +395,8 @@ func parseCleanEdits(payload map[string]any) ([]edit.FileEdit, error) {
 	}
 	raw, ok := payload["edits"]
 	if !ok || raw == nil {
-		// Single-file shorthand: top-level path + replacements/content.
-		if path, _ := payload["path"].(string); strings.TrimSpace(path) != "" {
-			raw = []any{payload}
-		} else {
-			return nil, &edit.ApplyError{Code: "INVALID_INPUT", Message: "edits required", Index: -1, Err: edit.ErrInvalidInput}
-		}
+		// 只接受 edits[]：单文件也必须包成一条 edit，避免顶层 path/operation 被静默忽略。
+		return nil, &edit.ApplyError{Code: "INVALID_INPUT", Message: "edits required; wrap a single file as edits: [{path, operation, ...}]", Index: -1, Err: edit.ErrInvalidInput}
 	}
 	encoded, err := json.Marshal(raw)
 	if err != nil {
@@ -425,6 +423,20 @@ func parseCleanEdits(payload map[string]any) ([]edit.FileEdit, error) {
 	if len(edits) == 0 {
 		return nil, &edit.ApplyError{Code: "INVALID_INPUT", Message: "edits required", Index: -1, Err: edit.ErrInvalidInput}
 	}
+	// 顶层 rev 快捷形态：单条 edit 未自带 rev 时套用。批量编辑必须逐条声明，
+	// 否则同一个 rev 会被误用到其它文件，因此直接拒绝而不是静默忽略。
+	if topRev := strings.TrimSpace(stringPayload(payload, "rev")); topRev != "" {
+		if len(edits) != 1 {
+			return nil, &edit.ApplyError{Code: "INVALID_INPUT", Message: "top-level rev only applies to a single edit; put rev on each edits[] item", Index: -1, Err: edit.ErrInvalidInput}
+		}
+		switch itemRev := strings.TrimSpace(edits[0].Revision); {
+		case itemRev == "":
+			edits[0].Revision = topRev
+		case itemRev != topRev:
+			// 两个 rev 不一致时不能猜：静默取一个会把版本围栏降级成“碰运气”。
+			return nil, &edit.ApplyError{Code: "INVALID_INPUT", Message: "top-level rev conflicts with edits[0].rev; keep a single consistent rev", Path: edits[0].Path, Index: 0, Err: edit.ErrInvalidInput}
+		}
+	}
 	for i := range edits {
 		if strings.TrimSpace(edits[i].Operation) == "" {
 			return nil, &edit.ApplyError{Code: "INVALID_INPUT", Message: fmt.Sprintf("edits[%d].operation required", i), Index: i, Err: edit.ErrInvalidInput}
@@ -434,7 +446,7 @@ func parseCleanEdits(payload map[string]any) ([]edit.FileEdit, error) {
 		}
 		if strings.TrimSpace(edits[i].Operation) == edit.OpUpdate || strings.TrimSpace(edits[i].Operation) == edit.OpRename {
 			if strings.TrimSpace(edits[i].Revision) == "" {
-				return nil, &edit.ApplyError{Code: "INVALID_INPUT", Message: fmt.Sprintf("edits[%d].rev required for update/rename", i), Path: edits[i].Path, Index: i, Err: edit.ErrInvalidInput}
+				return nil, &edit.ApplyError{Code: "REV_REQUIRED", Message: fmt.Sprintf("edits[%d].rev required for update/rename; read the file and pass data.rev", i), Path: edits[i].Path, Index: i, Err: edit.ErrInvalidInput}
 			}
 		}
 	}
