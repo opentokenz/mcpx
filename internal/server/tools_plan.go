@@ -16,7 +16,8 @@ import (
 
 func planTaskInputSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":                 "object",
+		"additionalProperties": false,
 		"properties": map[string]any{
 			"local_id":    stringSchema("可选的计划内局部依赖引用；仅用于 create 的 depends_on，服务端会生成正式 plan_task_id"),
 			"title":       stringSchema("任务标题"),
@@ -29,7 +30,8 @@ func planTaskInputSchema() map[string]any {
 
 func planEvidenceSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":                 "object",
+		"additionalProperties": false,
 		"properties": map[string]any{
 			"kind":         enumSchema("证据类型", plan.EvidenceKinds()...),
 			"reference_id": stringSchema("服务端签发的真实持久化证据引用"),
@@ -41,7 +43,8 @@ func planEvidenceSchema() map[string]any {
 
 func planOperationSchema() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":                 "object",
+		"additionalProperties": false,
 		"properties": map[string]any{
 			"action":       map[string]any{"type": "string", "enum": []string{"add", "update", "remove"}},
 			"plan_task_id": stringSchema("由 plan create/read 返回的精确 Plan Task ID；不得猜测"),

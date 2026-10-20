@@ -325,6 +325,10 @@ func classifyError(status Status, code string) (category string, retryable bool,
 	if code == "TOO_MANY_CHANGES" {
 		return "validation", true, "Split the edit into smaller batches and retry; keep total changed lines within the request limit."
 	}
+	if code == "REV_REQUIRED" {
+		// 缺少 rev 不是终态错误：read 取回 data.rev 后重试即可成功，因此标记为可重试。
+		return "validation", true, "Read the file to obtain the current data.rev, then retry the edit with that rev on the matching edits[] item."
+	}
 	if code == "LIMIT_EXCEEDED" {
 		return "validation", false, "Reduce the request to the advertised limit and retry."
 	}

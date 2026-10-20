@@ -172,6 +172,7 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		if _, allOf := schema["allOf"]; allOf {
 			t.Fatalf("%s must not rely on top-level allOf: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
+		assertOpenAICompatibleSchema(t, name, "$", schema)
 		if schema["additionalProperties"] != false {
 			t.Fatalf("%s must reject unknown arguments: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
@@ -506,4 +507,74 @@ func assertRequiredKeywordsAreArrays(t *testing.T, toolName, path string, value 
 			assertRequiredKeywordsAreArrays(t, toolName, fmt.Sprintf("%s[%d]", path, index), child)
 		}
 	}
+}
+
+// assertOpenAICompatibleSchema 递归断言公开 schema 落在 OpenAI 工具 schema 子集内：
+// 不使用组合/引用/扩展关键字，且声明了 properties 的 object 必须显式关闭额外字段。
+// 这些约束被 ChatGPT 侧忽略或拒绝时，服务端仍能正常运行，但模型会传不出正确参数。
+func assertOpenAICompatibleSchema(t *testing.T, toolName, path string, value any) {
+	t.Helper()
+	unsupported := []string{
+		"allOf", "not", "if", "then", "else", "dependentRequired", "dependentSchemas",
+		"$ref", "$defs", "definitions", "patternProperties", "unevaluatedProperties", "propertyNames",
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, keyword := range unsupported {
+			if _, found := typed[keyword]; found {
+				t.Fatalf("%s must not use unsupported schema keyword %q at %s", toolName, keyword, path)
+			}
+		}
+		if typed["type"] == "object" {
+			if properties, ok := typed["properties"].(map[string]any); ok && len(properties) > 0 && typed["additionalProperties"] != false {
+				t.Fatalf("%s object at %s declares properties without additionalProperties:false", toolName, path)
+			}
+		}
+		for key, child := range typed {
+			assertOpenAICompatibleSchema(t, toolName, path+"."+key, child)
+		}
+	case []any:
+		for index, child := range typed {
+			assertOpenAICompatibleSchema(t, toolName, fmt.Sprintf("%s[%d]", path, index), child)
+		}
+	}
+}
+
+// TestEditSchemaExposesRevisionGuard 防止“服务端要求 rev 但 schema 不给位置”的回归：
+// rev 必须同时出现在顶层与 edits[].properties，而 edits[].required 只约束结构字段。
+func TestEditSchemaExposesRevisionGuard(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	tool := rt.listedToolMap()["edit"]
+	var schema map[string]any
+	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tool), &schema); err != nil {
+		t.Fatal(err)
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	if properties["rev"] == nil {
+		t.Fatalf("edit must expose top-level rev so a single update can pass read data.rev: %s", mcpresult.ToolSchemaJSON(tool))
+	}
+	edits, _ := properties["edits"].(map[string]any)
+	items, _ := edits["items"].(map[string]any)
+	itemProperties, _ := items["properties"].(map[string]any)
+	for _, field := range []string{"path", "operation", "rev", "content", "content_base64", "newline_policy", "expected_format", "new_path", "replacements", "range"} {
+		if itemProperties[field] == nil {
+			t.Fatalf("edit.edits[].%s must be declared: %s", field, mcpresult.ToolSchemaJSON(tool))
+		}
+	}
+	required := map[string]bool{}
+	for _, raw := range asAnySlice(items["required"]) {
+		required[fmt.Sprint(raw)] = true
+	}
+	if len(required) != 2 || !required["path"] || !required["operation"] {
+		t.Fatalf("edit.edits[].required must stay structural (path, operation): %+v", items["required"])
+	}
+	if required["rev"] {
+		t.Fatalf("rev must not be unconditionally required in schema; runtime enforces it per operation")
+	}
+}
+
+// asAnySlice 把 JSON 解码后的数组统一成 []any，非数组返回 nil。
+func asAnySlice(value any) []any {
+	items, _ := value.([]any)
+	return items
 }

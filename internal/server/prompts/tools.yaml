@@ -3,7 +3,7 @@ tools:
   workspace: 零参数列出已注册 Workspace；用于创建 session 前发现工作空间。
   session: 创建、恢复或关闭 Remote Session；省略 action 默认 open/resume，remote_session_id 存在时恢复原会话，mode 可直接推导 close。
   read: 读取、搜索、列举或组装 Workspace 源码上下文；view 在语义唯一时可省略，items[] 支持批量文件读取。
-  edit: 创建、更新或重命名 Workspace 文件；使用 revision guard 和幂等语义，不提供删除。删除/移出使用 move_out。
+  edit: 创建、更新或重命名 Workspace 文件；update/rename 必须带上 read 返回的 data.rev（单条 edit 可写在顶层 rev），使用幂等语义，不提供删除。删除/移出使用 move_out。
   move_out: 安全移出明确文件、目录或 symlink；prepare 冻结 manifest，用户确认后 submit 仅携带服务端 confirmation_uuid。
   observe: 查看会话、执行 Task、Plan Task、历史或日志；目标唯一时可省略 view，任务日志支持流式 offset 续读。
   progress: 发布用户可见进度与终态；过程仅用于有业务意义的里程碑、等待、阻塞或失败，任务正常完成并准备最终回复前必须用 completed + result 汇报一次最终结果。
