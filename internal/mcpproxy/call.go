@@ -265,17 +265,28 @@ func connect(ctx context.Context, srv config.MCPServer, timeout time.Duration, o
 	if srv.Command == "" {
 		return nil, func() {}, fmt.Errorf("empty command")
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	connectCtx, cancelConnect := context.WithTimeout(ctx, timeout)
+	// The connect timeout bounds the handshake only. The process must outlive it:
+	// a tool call may still be running long after the server answered initialize.
+	// Binding exec.CommandContext to connectCtx would kill the child once the
+	// timeout elapses, which is what breaks long-running tools.
+	procCtx, cancelProc := context.WithCancel(ctx)
+	cancelAll := func() {
+		cancelProc()
+		cancelConnect()
+	}
 
-	cmd := exec.CommandContext(ctx, srv.Command, srv.Args...)
+	cmd := exec.CommandContext(procCtx, srv.Command, srv.Args...)
 	// Windows 下隐藏上游 MCP 命令创建的控制台窗口；其他系统为空操作。
 	winproc.ConfigureNoWindow(cmd)
 	cmd.Env = append(os.Environ(), ExpandEnv(srv.Env)...)
 	client := mcp.NewClient(&mcp.Implementation{Name: "mcpx", Version: buildversion.Current}, options)
-	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	session, err := client.Connect(connectCtx, &mcp.CommandTransport{Command: cmd}, nil)
+	// The handshake is over, so the connect timeout must not fire any more.
+	cancelConnect()
 	if err != nil {
-		cancel()
+		cancelAll()
 		return nil, func() {}, fmt.Errorf("connect upstream mcp: %w", err)
 	}
-	return session, cancel, nil
+	return session, cancelAll, nil
 }
