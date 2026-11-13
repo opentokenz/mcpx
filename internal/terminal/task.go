@@ -731,47 +731,64 @@ func (m *TaskManager) List(remoteSessionID string, limit int) ([]map[string]any,
 		return result, nil
 	}
 
+	// The store runs on a single SQLite connection (SetMaxOpenConns(1)). Read every
+	// row and close the cursor before touching any live task: Task.finishLocked
+	// writes to the database while holding t.mu, so calling StatusView (which
+	// takes t.mu) with the cursor still open deadlocks the whole store the moment
+	// a task exits during a List.
+	type taskRow struct {
+		id, workspaceName, command, status string
+		pid, logTrunc                      int
+		exitCode, startedAt, finishedAt    sql.NullInt64
+	}
 	rows, err := m.db.Query(`SELECT id, workspace_name, command, status, pid,
         exit_code, log_truncated, started_at, finished_at
         FROM terminal_tasks WHERE remote_session_id = ? ORDER BY started_at DESC, id DESC LIMIT ?`, remoteSessionID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	items := make([]map[string]any, 0, limit)
+	scanned := make([]taskRow, 0, limit)
 	for rows.Next() {
-		var id, workspaceName, command, status string
-		var pid, logTruncated int
-		var exitCode, startedAt, finishedAt sql.NullInt64
-		if err := rows.Scan(&id, &workspaceName, &command, &status, &pid,
-			&exitCode, &logTruncated, &startedAt, &finishedAt); err != nil {
+		var r taskRow
+		if err := rows.Scan(&r.id, &r.workspaceName, &r.command, &r.status, &r.pid,
+			&r.exitCode, &r.logTrunc, &r.startedAt, &r.finishedAt); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		scanned = append(scanned, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	items := make([]map[string]any, 0, len(scanned))
+	for _, r := range scanned {
 		m.mu.Lock()
-		active := m.tasks[id]
+		active := m.tasks[r.id]
 		m.mu.Unlock()
 		if active != nil {
 			items = append(items, active.StatusView())
 			continue
 		}
-		started := time.UnixMilli(startedAt.Int64).UTC()
+		started := time.UnixMilli(r.startedAt.Int64).UTC()
 		view := map[string]any{
-			"execution_task_id": id, "status": TaskStatus(status), "pid": pid,
-			"workspace": workspaceName, "command": command, "log_truncated": logTruncated != 0,
+			"execution_task_id": r.id, "status": TaskStatus(r.status), "pid": r.pid,
+			"workspace": r.workspaceName, "command": r.command, "log_truncated": r.logTrunc != 0,
 			"runtime_ms": time.Since(started).Milliseconds(),
 		}
-		if finishedAt.Valid {
-			finished := time.UnixMilli(finishedAt.Int64).UTC()
+		if r.finishedAt.Valid {
+			finished := time.UnixMilli(r.finishedAt.Int64).UTC()
 			view["finished_at"] = finished
 			view["runtime_ms"] = finished.Sub(started).Milliseconds()
 		}
-		if exitCode.Valid {
-			view["exit_code"] = int(exitCode.Int64)
+		if r.exitCode.Valid {
+			view["exit_code"] = int(r.exitCode.Int64)
 		}
 		items = append(items, view)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	return items, nil
 }
